@@ -13,6 +13,7 @@ import bookShipmentHelper from "./helpers/bookShipmentHelper.js";
 import trackOrderHelper from "./helpers/trackOrderHelper.js";
 import getMyDetailsAPI from "./APIS/getMyDetailsAPI.js";
 import { signupUser } from "./helpers/signupHelper.js";
+import ticketCreateHelper, { startTicketFlow } from "./helpers/ticketCreateHelper.js";
 
 dotenv.config();
 const app = express();
@@ -246,6 +247,7 @@ app.post("/webhook", async (req, res) => {
         [
           { title: "Book a Shipment", postbackText: "book" },
           { title: "Track an Order", postbackText: "track" },
+          { title: "Create Ticket", postbackText: "ticket" },
           { title: "Logout", postbackText: "logout" },
         ],
         "✅ Login successful!\nWhat would you like to do?",
@@ -286,6 +288,12 @@ app.post("/webhook", async (req, res) => {
     } else if (msg_lower === "logout") {
       await resetSession(phone);
       await sendMessage(phone, '✅ You have been logged out. Type "hi" to login again.');
+    } else if (msg_lower === "ticket" || session.operation === "ticketing") {
+      if (msg_lower === "ticket" && session.operation !== "ticketing") {
+        return startTicketFlow(phone, session);
+      } else {
+        await ticketCreateHelper(phone, msg);
+      }
     } else {
       await sendQuickReplies(
         phone,
@@ -299,19 +307,19 @@ app.post("/webhook", async (req, res) => {
         "Select"
       );
     }
+
     return res.sendStatus(200);
-  }
 
-  // -----------------------------
-  // Fallback
-  // -----------------------------
-  await sendMessage(phone, "⚠️ Sorry, I didn't understand. Type 'hi' to restart.");
-  return res.sendStatus(200);
-});
+    // -----------------------------
+    // Fallback
+    // -----------------------------
+    await sendMessage(phone, "⚠️ Sorry, I didn't understand. Type 'hi' to restart.");
+    return res.sendStatus(200);
 
-// ================================
-// Start Server
-// ================================
-app.listen(PORT, () => {
-  console.log(`🚀 WhatsApp bot running at http://localhost:${PORT}/webhook`);
-});
+
+    // ================================
+    // Start Server
+    // ================================
+    app.listen(PORT, () => {
+      console.log(`🚀 WhatsApp bot running at http://localhost:${PORT}/webhook`);
+    });
