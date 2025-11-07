@@ -348,13 +348,19 @@ app.post("/webhook", async (req, res) => {
         }
         return res.sendStatus(200);
       }
-      
-      if (msg_lower === "rate" || msg_lower === "rates" || msg_lower === "calculator" || session.operation === "ratecalc") {
+
+      if (
+        msg_lower === "rate" ||
+        msg_lower === "rates" ||
+        msg_lower === "calculator" ||
+        session.operation === "ratecalc"
+      ) {
         if (msg_lower === "rate" && session.operation !== "ratecalc") {
-          return startRateFlow(phone, session);
+          await startRateFlow(phone, session);
         } else {
-          return rateCalcHelper(phone, msg);
+          await rateCalcHelper(phone, msg);
         }
+        return res.sendStatus(200);
       }
 
       // default authenticated menu
