@@ -278,7 +278,7 @@ app.post("/webhook", async (req, res) => {
 
         await getMyDetailsAPI(phone);
 
-        await sendQuickReplies(
+        await sendListMessage(
           phone,
           [
             { title: "Book a Shipment", postbackText: "book" },
@@ -286,9 +286,10 @@ app.post("/webhook", async (req, res) => {
             { title: "Create Ticket", postbackText: "ticket" },
             { title: "Logout", postbackText: "logout" },
           ],
-          "✅ Login successful!\nWhat would you like to do?",
+          "✅ You are already logged in. Choose an option:",
           "Logistos Bot",
-          "Choose an option"
+          "Select",
+          "Open menu"
         );
       } catch (err) {
         console.error("❌ Login failed:", err.message);
