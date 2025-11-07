@@ -273,8 +273,10 @@ app.post("/webhook", async (req, res) => {
           { headers: { "Content-Type": "application/json" } }
         );
 
+        // after successful login
         session.token = loginRes.data.access;
-        session.state = "authenticated";
+        session.state = 'authenticated';
+        session.expiresAt = new Date(Date.now() + 48 * 60 * 60 * 1000); // 48h
         await session.save();
 
         await getMyDetailsAPI(phone);
