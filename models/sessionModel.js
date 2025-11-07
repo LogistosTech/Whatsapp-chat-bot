@@ -7,6 +7,8 @@ const sessionSchema = new mongoose.Schema(
     email: String,
     token: String,
 
+    client_id: Number,   
+
     // Normalize naming used elsewhere
     client_id: Number, // (was clientId) keep what you actually use; align your code
 
