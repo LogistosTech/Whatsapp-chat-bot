@@ -42,8 +42,14 @@ const sessionSchema = new mongoose.Schema(
 
     // temporary stash for ticket creation
     ticketDraft: {
-      type: mongoose.Schema.Types.Mixed,
-      default: {}
+      type: new mongoose.Schema({
+        type_key: String,
+        subtype_key: String,
+        shipment_id: String,
+        awb: String,
+        note: String,
+      }, { _id: false }),
+      default: {},
     },
 
     // optional signup helper
