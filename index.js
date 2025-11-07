@@ -113,10 +113,24 @@ app.post("/webhook", async (req, res) => {
 
     console.log(`📥 Received from ${phone}: ${msg}`);
 
+    // Deduplicate re-deliveries
+    const incomingId = messageObj?.id || messageObj?.key?.id || "";
+
     // Load or create session
     let session = await Session.findOne({ phone });
     if (!session) {
       session = await Session.create({ phone, state: "start" });
+    }
+
+    // If same WA message ID already processed, just ACK to stop retries
+    if (incomingId && session.lastMsgId === incomingId) {
+      console.log("↩️  Duplicate message detected, skipping:", incomingId);
+      return res.sendStatus(200);
+    }
+    // Save it right away so retries won’t re-run logic
+    if (incomingId) {
+      session.lastMsgId = incomingId;
+      await session.save();
     }
 
     /* -----------------------------

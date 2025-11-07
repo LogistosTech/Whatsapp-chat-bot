@@ -8,7 +8,8 @@ const sessionSchema = new mongoose.Schema(
     token: String,
     clientId: Number,
     state: String,
-
+    lastMsgId: String,
+    
     // add 'ratecalc' here
     operation: {
       type: String,
