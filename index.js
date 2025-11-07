@@ -15,6 +15,7 @@ import getMyDetailsAPI from "./APIS/getMyDetailsAPI.js";
 import { signupUser } from "./helpers/signupHelper.js";
 import ticketCreateHelper, { startTicketFlow } from "./helpers/ticketCreateHelper.js";
 import sendListMessage from "./functions/sendListMessage.js";
+import rateCalcHelper, { startRateFlow } from "./helpers/rateCalcHelper.js";
 
 dotenv.config();
 const app = express();
@@ -284,8 +285,9 @@ app.post("/webhook", async (req, res) => {
         await sendListMessage(
           phone,
           [
-            { title: "Book a Shipment", postbackText: "book" },
+            // { title: "Book a Shipment", postbackText: "book" },
             { title: "Track an Order", postbackText: "track" },
+            { title: "Rate Calculator", postbackText: "rate" },
             { title: "Create Ticket", postbackText: "ticket" },
             { title: "Logout", postbackText: "logout" },
           ],
@@ -346,12 +348,21 @@ app.post("/webhook", async (req, res) => {
         }
         return res.sendStatus(200);
       }
+      
+      if (msg_lower === "rate" || msg_lower === "rates" || msg_lower === "calculator" || session.operation === "ratecalc") {
+        if (msg_lower === "rate" && session.operation !== "ratecalc") {
+          return startRateFlow(phone, session);
+        } else {
+          return rateCalcHelper(phone, msg);
+        }
+      }
 
       // default authenticated menu
       await sendQuickReplies(
         phone,
         [
-          { title: "Book a Shipment", postbackText: "book" },
+          // { title: "Book a Shipment", postbackText: "book" },
+          { title: "Rate Calculator", postbackText: "rate" },
           { title: "Track an Order", postbackText: "track" },
           { title: "Create Ticket", postbackText: "ticket" },
           { title: "Logout", postbackText: "logout" },

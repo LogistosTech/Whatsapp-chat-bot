@@ -6,57 +6,60 @@ const sessionSchema = new mongoose.Schema(
     phone: { type: String, required: true, unique: true },
     email: String,
     token: String,
+    clientId: Number,
+    state: String,
 
-    // required by ticket creation
-    client_id: Number,
-
-    state: { type: String, default: 'start' },
-
+    // add 'ratecalc' here
     operation: {
       type: String,
-      enum: ['booking', 'tracking', 'ticketing', null],   // ← include 'ticketing'
+      enum: ['booking', 'tracking', 'ticketing', 'ratecalc', null],
       default: null
     },
 
-    // tracking flow (existing)
+    // tracking (already there)
     trackingStatus: {
       type: String,
       enum: ['init', 'in_progress', 'completed'],
       default: 'init'
     },
 
-    // ticket flow (MUST include every state you set in code)
-    ticketStatus: {
+    // 🔹 Rate calculator conversation state
+    rateStatus: {
       type: String,
       enum: [
-        'choose_type',
-        'choose_subtype',
-        'need_shipment',
-        'need_awb',
-        'need_details',
-        'done',
-        null
+        'init',
+        'pickup_pin',
+        'drop_pin',
+        'courier_type',
+        'mode',
+        'units',
+        'weight',
+        'dimension',
+        'dims',
+        'invoice',
+        'paytype',
+        'payamount',
+        'confirm',
+        'fetching',
+        'done'
       ],
-      default: null
+      default: 'init'
     },
 
-    // temporary stash for ticket creation
-    ticketDraft: {
-      type: new mongoose.Schema({
-        type_key: String,
-        subtype_key: String,
-        shipment_id: String,
-        awb: String,
-        note: String,
-      }, { _id: false }),
-      default: {},
-    },
-
-    // optional signup helper
-    signup_type: { type: String, enum: ['individual', 'organization', null], default: null },
+    // 🔹 Temp draft while collecting inputs
+    rateDraft: {
+      type: mongoose.Schema.Types.Mixed,
+      default: {}
+    }
   },
   { timestamps: true }
 );
 
-// IMPORTANT: support hot-reload / re-deploy without model overwrite errors
-export default mongoose.models.Session || mongoose.model('Session', sessionSchema);
+// TTLs unchanged…
+sessionSchema.index(
+  { updatedAt: 1 },
+  { expireAfterSeconds: 300, partialFilterExpression: { state: { $ne: "authenticated" } } }
+);
+sessionSchema.index({ updatedAt: 1 }, { expireAfterSeconds: 86400 });
+
+export default mongoose.model('Session', sessionSchema);

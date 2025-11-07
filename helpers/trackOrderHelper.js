@@ -112,7 +112,8 @@ const trackOrderHelper = async (phone, msg = "") => {
         await sendQuickReplies(
           phone,
           [
-            { title: "Book a Shipment", postbackText: "book" },
+            // { title: "Book a Shipment", postbackText: "book" },
+            { title: "Rate Calculator", postbackText: "rate" },
             { title: "Track an Order", postbackText: "track" },
             { title: "Create Ticket", postbackText: "ticket" },
             { title: "Logout", postbackText: "logout" },
