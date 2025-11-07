@@ -7,53 +7,50 @@ const sessionSchema = new mongoose.Schema(
     email: String,
     token: String,
 
-    client_id: Number,   
+    // required by ticket creation
+    client_id: Number,
 
-    // Normalize naming used elsewhere
-    client_id: Number, // (was clientId) keep what you actually use; align your code
+    state: { type: String, default: 'start' },
 
-    // High-level state machine
-    state: { type: String, default: 'start' }, // start | awaiting_login_or_signup | awaiting_email | ...
-
-    // Operation within authenticated context
     operation: {
       type: String,
-      enum: ['booking', 'tracking', 'ticketing', null],
-      default: null,
+      enum: ['booking', 'tracking', 'ticketing', null],   // ← include 'ticketing'
+      default: null
     },
 
-    // Tracking sub-state (your existing flow)
+    // tracking flow (existing)
     trackingStatus: {
       type: String,
       enum: ['init', 'in_progress', 'completed'],
-      default: 'init',
+      default: 'init'
     },
 
-    // Ticket creation sub-state (used by ticketing flow)
+    // ticket flow (MUST include every state you set in code)
     ticketStatus: {
       type: String,
-      enum: ['choose_subtype', 'need_shipment', 'need_code', 'need_details', 'done', null],
-      default: null,
+      enum: [
+        'choose_type',
+        'choose_subtype',
+        'need_shipment',
+        'need_awb',
+        'need_details',
+        'done',
+        null
+      ],
+      default: null
     },
 
-    // Temporary stash for ticket flow
+    // temporary stash for ticket creation
     ticketDraft: {
       type: mongoose.Schema.Types.Mixed,
-      default: {},
+      default: {}
     },
 
-    // Optional: login helper fields you referenced
+    // optional signup helper
     signup_type: { type: String, enum: ['individual', 'organization', null], default: null },
-
-    // Optional: per-doc TTL control (see below)
-    expiresAt: { type: Date, default: null },
   },
   { timestamps: true }
 );
 
-// ✅ Single TTL index using a dedicated field.
-//    You control TTL by setting `expiresAt` in code.
-//    Example: unauthenticated -> now+5m, authenticated -> now+48h.
-sessionSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 });
-
-export default mongoose.model('Session', sessionSchema);
+// IMPORTANT: support hot-reload / re-deploy without model overwrite errors
+export default mongoose.models.Session || mongoose.model('Session', sessionSchema);
