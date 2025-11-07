@@ -93,7 +93,7 @@ const trackOrderHelper = async (phone, msg = "") => {
 
             const icon =
               entry.status.toUpperCase() === "NOT_PICKED" ? "⚠️" : "✅";
-                statusHistoryText += `
+            statusHistoryText += `
                 📅 *${date}*
                 ${icon} ${entry.status} - ${entry.location} at ${time}
                 📝 Reason: ${entry.reason}
@@ -112,18 +112,10 @@ const trackOrderHelper = async (phone, msg = "") => {
         await sendQuickReplies(
           phone,
           [
-            {
-              title: "Track Another Order",
-              postbackText: "track",
-            },
-            {
-              title: "Book a Shipment",
-              postbackText: "book",
-            },
-            {
-              title: "Logout",
-              postbackText: "logout",
-            },
+            { title: "Book a Shipment", postbackText: "book" },
+            { title: "Track an Order", postbackText: "track" },
+            { title: "Create Ticket", postbackText: "ticket" },
+            { title: "Logout", postbackText: "logout" },
           ],
           "What next?",
           "Logistos Bot",
