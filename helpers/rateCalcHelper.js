@@ -38,6 +38,65 @@ export async function startRateFlow(phone, session) {
     await sendMessage(phone, "Enter *Origin Pincode*:");
 }
 
+function buildRatePayload(d) {
+    // coerce numbers safely
+    const units = Number.isFinite(+d.units) && +d.units > 0 ? (+d.units | 0) : 1;
+    const perBoxW = Number.isFinite(+d.weight) && +d.weight > 0 ? +d.weight : 0;
+    const length = Number.isFinite(+d.length) ? +d.length : 0;
+    const width = Number.isFinite(+d.width) ? +d.width : 0;
+    const height = Number.isFinite(+d.height) ? +d.height : 0;
+    const unit = (d.unit === "IN" || d.unit === "CM") ? d.unit : "CM";
+
+    // convert IN → CM for API
+    const toCM = unit === "IN"
+        ? (n) => +(n * 2.54).toFixed(2)
+        : (n) => +n;
+
+    const qty = Math.max(1, units);
+    const totalWeight = +(qty * perBoxW).toFixed(2);
+
+    const spt = ["0", "1", "2"].includes(String(d.shipment_payment_type)) ? String(d.shipment_payment_type) : "0";
+    const payAmt = Number.isFinite(+d.shipment_payment_amount) ? +d.shipment_payment_amount : undefined;
+
+    const payload = {
+        pickup_pin: String(d.pickup_pin || "").trim(),
+        mode_name: d.mode_name || "surface",
+        from_city: "", from_state: "",
+        drop_pin: String(d.drop_pin || "").trim(),
+        to_city: "", to_state: "",
+        quantity: qty,
+        weight: totalWeight,
+        invoice_value: Number.isFinite(+d.invoice_value) ? +d.invoice_value : 0,
+        mps_details: [{
+            units: qty,               // ✅ never null
+            weight: perBoxW,          // per-box
+            length: toCM(length),
+            width: toCM(width),
+            height: toCM(height),
+            unit: "CM",
+        }],
+        shipment_payment_type: spt,
+        is_to_pay: spt === "2",
+        is_cod: spt === "1",
+        ...(spt === "1" && payAmt != null ? { cod_amount: payAmt } : {}),
+        ...(spt !== "0" && payAmt != null ? { shipment_payment_amount: payAmt } : {}),
+        rov_mode: "rov_owner",
+        special_delivery_type: "",
+        courier_type: (d.courier_type === "B2B" || d.courier_type === "B2C") ? d.courier_type : "B2C",
+        self_drop: false,
+        is_abd_scheduled: false,
+    };
+
+    // minimal guards
+    if (!/^\d{6}$/.test(payload.pickup_pin) || !/^\d{6}$/.test(payload.drop_pin)) {
+        throw new Error("Invalid pincode(s).");
+    }
+    if (payload.weight <= 0 || payload.quantity <= 0 || payload.mps_details[0].units <= 0) {
+        throw new Error("Invalid weight/quantity.");
+    }
+    return JSON.parse(JSON.stringify(payload)); // strip undefined
+}
+
 export default async function rateCalcHelper(phone, msg = "") {
     const Session = (await import("../models/sessionModel.js")).default;
     let session = await Session.findOne({ phone });
@@ -209,49 +268,14 @@ export default async function rateCalcHelper(phone, msg = "") {
             if (lower !== "ok") return sendMessage(phone, 'Please type *OK* to proceed (or *restart*).');
 
             const d = session.rateDraft;
-            // Build request object (minimal required fields)
-            const totalWeight = Number(d.units) * Number(d.weight);
-            const mps = [{
-                units: Number(d.units),
-                weight: Number(d.weight),
-                length: Number(d.length),
-                width: Number(d.width),
-                height: Number(d.height),
-                unit: d.unit || "CM",
-            }];
 
-            // Convert IN → CM for API
-            const normalizedMps = mps.map(box =>
-                box.unit === "IN"
-                    ? { ...box, unit: "CM", length: +(box.length * 2.54).toFixed(2), width: +(box.width * 2.54).toFixed(2), height: +(box.height * 2.54).toFixed(2) }
-                    : box
-            );
+            try {
+                const payload = buildRatePayload(d); // ✅ sanitized
+                session.rateStatus = "fetching";
+                await session.save();
+                await sendMessage(phone, "Calculating best rates…");
 
-            const payload = {
-                pickup_pin: d.pickup_pin,
-                mode_name: d.mode_name,
-                from_city: "", from_state: "",   // optional for API (left blank like UI autofill)
-                drop_pin: d.drop_pin,
-                to_city: "", to_state: "",
-                quantity: Number(d.units),
-                weight: totalWeight,
-                invoice_value: Number(d.invoice_value),
-                mps_details: normalizedMps,
-                shipment_payment_type: d.shipment_payment_type,     // "0" | "1" | "2"
-                is_to_pay: d.shipment_payment_type === "2",
-                is_cod: d.shipment_payment_type === "1",
-                cod_amount: d.shipment_payment_amount,              // if provided
-                shipment_payment_amount: d.shipment_payment_amount, // mirrors UI
-                rov_mode: d.courier_type === "B2C" ? "rov_owner" : "rov_owner", // keep as owner for now
-                special_delivery_type: "",                          // optional
-                courier_type: d.courier_type,                       // "B2B" | "B2C"
-                self_drop: false,
-                is_abd_scheduled: false,
-            };
-
-            session.rateStatus = "fetching";
-            await session.save();
-            await sendMessage(phone, "Calculating best rates…");
+                const data = await getRatesAPI(phone, payload);
 
             try {
                 const data = await getRatesAPI(phone, payload);
