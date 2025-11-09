@@ -277,65 +277,63 @@ export default async function rateCalcHelper(phone, msg = "") {
 
                 const data = await getRatesAPI(phone, payload);
 
-            try {
-                const data = await getRatesAPI(phone, payload);
-                const rows = Object.entries(data).map(([key, val]) => {
-                    const item = val || {};
-                    const price = item?.rates;
-                    const gt = item?.logistos_working?.grand_total ?? price;
-                    const numeric = typeof gt === "number" ? gt : Number.isFinite(+gt) ? +gt : null;
-                    return {
-                        key,
-                        partner: item.delivery_partner || key.split("-")[0],
-                        mode: item.mode_name || payload.mode_name,
-                        grand_total: numeric,
-                        tat: item.tat || item.avg_delivery_days || "",
-                        w: item?.logistos_working || {},
-                        logo: item.logo || null,
-                    };
-                });
+                try {
+                    const data = await getRatesAPI(phone, payload);
+                    const rows = Object.entries(data).map(([key, val]) => {
+                        const item = val || {};
+                        const price = item?.rates;
+                        const gt = item?.logistos_working?.grand_total ?? price;
+                        const numeric = typeof gt === "number" ? gt : Number.isFinite(+gt) ? +gt : null;
+                        return {
+                            key,
+                            partner: item.delivery_partner || key.split("-")[0],
+                            mode: item.mode_name || payload.mode_name,
+                            grand_total: numeric,
+                            tat: item.tat || item.avg_delivery_days || "",
+                            w: item?.logistos_working || {},
+                            logo: item.logo || null,
+                        };
+                    });
 
-                const valid = rows.filter(r => Number.isFinite(r.grand_total));
-                if (!valid.length) {
-                    session.rateStatus = "done";
-                    await session.save();
-                    await sendMessage(phone, "No payable options returned for this route/inputs.");
-                    return sendQuickReplies(
-                        phone,
-                        [
-                            { title: "Try Different Inputs", postbackText: "rate" },
-                            { title: "Book a Shipment", postbackText: "book" },
-                            { title: "Logout", postbackText: "logout" },
-                        ],
-                        "What next?",
-                        "Logistos Bot",
-                        "Choose"
-                    );
-                }
+                    const valid = rows.filter(r => Number.isFinite(r.grand_total));
+                    if (!valid.length) {
+                        session.rateStatus = "done";
+                        await session.save();
+                        await sendMessage(phone, "No payable options returned for this route/inputs.");
+                        return sendQuickReplies(
+                            phone,
+                            [
+                                { title: "Try Different Inputs", postbackText: "rate" },
+                                { title: "Book a Shipment", postbackText: "book" },
+                                { title: "Logout", postbackText: "logout" },
+                            ],
+                            "What next?",
+                            "Logistos Bot",
+                            "Choose"
+                        );
+                    }
 
-                // sort ascending by cost
-                valid.sort((a, b) => a.grand_total - b.grand_total);
-                const top = valid.slice(0, 5);
+                    valid.sort((a, b) => a.grand_total - b.grand_total);
+                    const top = valid.slice(0, 5);
 
-                // Compose summary
-                const lines = top.map((r, i) =>
-                    `${i === 0 ? "🏆" : "•"} ${r.partner} (${r.mode}) — ₹${r.grand_total.toFixed(0)}${r.tat ? ` — TAT: ${r.tat}d` : ""}`
-                ).join("\n");
+                    const lines = top.map((r, i) =>
+                        `${i === 0 ? "🏆" : "•"} ${r.partner} (${r.mode}) — ₹${r.grand_total.toFixed(0)}${r.tat ? ` — TAT: ${r.tat}d` : ""}`
+                    ).join("\n");
 
-                const best = top[0];
-                const w = best.w || {};
-                const breakdown = [
-                    w.freight ? `Freight: ₹${w.freight}` : null,
-                    w.fsc ? `FSC: ₹${w.fsc}` : null,
-                    w.oda ? `ODA: ₹${w.oda}` : null,
-                    w.fm_charges ? `FM: ₹${w.fm_charges}` : null,
-                    w.lm_charges ? `LM: ₹${w.lm_charges}` : null,
-                    w.handling_charges ? `Handling: ₹${w.handling_charges}` : null,
-                    w.gst ? `GST: ₹${typeof w.gst === 'number' ? w.gst.toFixed(2) : w.gst}` : null,
-                ].filter(Boolean).join(" | ");
+                    const best = top[0];
+                    const w = best.w || {};
+                    const breakdown = [
+                        w.freight ? `Freight: ₹${w.freight}` : null,
+                        w.fsc ? `FSC: ₹${w.fsc}` : null,
+                        w.oda ? `ODA: ₹${w.oda}` : null,
+                        w.fm_charges ? `FM: ₹${w.fm_charges}` : null,
+                        w.lm_charges ? `LM: ₹${w.lm_charges}` : null,
+                        w.handling_charges ? `Handling: ₹${w.handling_charges}` : null,
+                        w.gst ? `GST: ₹${typeof w.gst === 'number' ? w.gst.toFixed(2) : w.gst}` : null,
+                    ].filter(Boolean).join(" | ");
 
-                const msgText =
-                    `📦 *Rate Comparison*
+                    const msgText =
+                        `📦 *Rate Comparison*
 From ${d.pickup_pin} ➝ ${d.drop_pin}
 Type: *${d.courier_type}*, Mode: *${best.mode}*
 Qty: *${d.units}*, Wt/box: *${d.weight} KG*
@@ -347,32 +345,37 @@ ${lines}
 *Best Option:* ${best.partner} — *₹${best.grand_total.toFixed(0)}*
 ${breakdown ? `_${breakdown}_` : ""}`;
 
-                await sendMessage(phone, msgText);
+                    await sendMessage(phone, msgText);
 
-                await sendQuickReplies(
-                    phone,
-                    [
-                        { title: "Recalculate", postbackText: "rate" },
-                        { title: "Book a Shipment", postbackText: "book" },
-                        { title: "Track an Order", postbackText: "track" },
-                        { title: "Logout", postbackText: "logout" },
-                    ],
-                    "What next?",
-                    "Logistos Bot",
-                    "Choose"
-                );
+                    await sendQuickReplies(
+                        phone,
+                        [
+                            { title: "Recalculate", postbackText: "rate" },
+                            { title: "Book a Shipment", postbackText: "book" },
+                            { title: "Track an Order", postbackText: "track" },
+                            { title: "Logout", postbackText: "logout" },
+                        ],
+                        "What next?",
+                        "Logistos Bot",
+                        "Choose"
+                    );
 
-                session.rateStatus = "done";
-                session.operation = null;           // return to main menu after completion
-                session.rateDraft = {};
-                await session.save();
-            } catch (err) {
-                console.error("❌ Rate calc error:", err?.response?.data || err.message);
-                session.rateStatus = "confirm";
-                await session.save();
-                await sendMessage(phone, "Couldn’t fetch rates. Check inputs or type *restart*.");
+                    session.rateStatus = "done";
+                    session.operation = null;
+                    session.rateDraft = {};
+                    await session.save();
+                } catch (err) {
+                    console.error("❌ Rate calc error:", err?.response?.data || err.message);
+                    session.rateStatus = "confirm";
+                    await session.save();
+                    await sendMessage(phone, "Couldn’t fetch rates. Check inputs or type *restart*.");
+                }
+                return; // ✅ close inner try-catch properly
+            } catch (err) {  // ✅ outer catch added
+                console.error("❌ Payload/build error:", err.message);
+                await sendMessage(phone, "Something went wrong while preparing your rate request. Type *restart* to try again.");
             }
-            return;
+            break;
         }
 
         case "fetching":
