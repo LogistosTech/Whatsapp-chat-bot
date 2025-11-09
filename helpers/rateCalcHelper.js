@@ -267,7 +267,25 @@ export default async function rateCalcHelper(phone, msg = "") {
         case "confirm": {
             if (lower !== "ok") return sendMessage(phone, 'Please type *OK* to proceed (or *restart*).');
 
-            const d = session.rateDraft;
+            const d = session.rateDraft || {};
+            const missing = [];
+            if (!/^\d{6}$/.test(String(d.pickup_pin || ""))) missing.push("Origin Pincode");
+            if (!/^\d{6}$/.test(String(d.drop_pin || ""))) missing.push("Destination Pincode");
+            if (!d.courier_type) missing.push("Courier Type");
+            if (!d.mode_name) missing.push("Mode");
+            if (!d.units) missing.push("Box Count");
+            if (!d.weight) missing.push("Weight per Box");
+            if (!d.length || !d.width || !d.height || !d.unit) missing.push("Dimensions");
+            if (typeof d.invoice_value !== "number") missing.push("Declared Value");
+
+            if (missing.length) {
+                // bounce back to first missing step instead of throwing
+                session.rateStatus = "pickup_pin";
+                session.rateDraft = {}; // clear stale data to avoid weird loops
+                await session.save();
+                return sendMessage(phone,
+                    `We need a few details first: *${missing.join(", ")}*.\n\nEnter *Origin Pincode* to start:`);
+            }
 
             try {
                 const payload = buildRatePayload(d); // ✅ sanitized
@@ -379,13 +397,31 @@ ${breakdown ? `_${breakdown}_` : ""}`;
         }
 
         case "fetching":
+            return sendMessage(phone, "Still working… type *restart* to start over.");
+
         case "done":
+            return sendQuickReplies(
+                phone,
+                [
+                    { title: "Recalculate", postbackText: "rate" },
+                    { title: "Book a Shipment", postbackText: "book" },
+                    { title: "Track an Order", postbackText: "track" },
+                    { title: "Logout", postbackText: "logout" },
+                ],
+                "All set. What next?",
+                "Logistos Bot",
+                "Menu"
+            );
+
         default:
-            // restart lightweight
-            session.rateStatus = "pickup_pin";
-            session.operation = "ratecalc";
-            session.rateDraft = {};
-            await session.save();
-            return sendMessage(phone, "Enter *Origin Pincode*:");
+            return; // don't silently reset to pickup_pin
+
+        // default:
+        //     // restart lightweight
+        //     session.rateStatus = "pickup_pin";
+        //     session.operation = "ratecalc";
+        //     session.rateDraft = {};
+        //     await session.save();
+        //     return sendMessage(phone, "Enter *Origin Pincode*:");
     }
 }
