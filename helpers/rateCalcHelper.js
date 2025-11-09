@@ -91,6 +91,15 @@ function nextMissing(d) {
     return null;
 }
 
+// put this near the top or anywhere outside the switch
+export async function startRateFlow(phone, session) {
+    session.operation = "ratecalc";
+    session.rateStatus = "pickup_pin";
+    session.rateDraft = {};
+    await session.save();
+    await sendMessage(phone, "Enter *Origin Pincode*:");
+}
+
 export default async function rateCalcHelper(phone, msg = "") {
     const Session = (await import("../models/sessionModel.js")).default;
     let session = await Session.findOne({ phone });
