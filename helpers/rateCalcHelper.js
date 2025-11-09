@@ -107,40 +107,15 @@ export default async function rateCalcHelper(phone, msg = "") {
     const raw = String(msg || "").trim();
     const lower = raw.toLowerCase();
 
-    // 🔧 FIX: Simplified intent sniffer - only process if not in a specific state
+    // Initialize session if needed
+    session.operation ||= "ratecalc";
     session.rateDraft ||= {};
+    session.rateStatus ||= "init";
+
     const d = session.rateDraft;
+    const currentState = session.rateStatus;
 
-    let st = session.rateStatus || "init";
-
-    // 🔧 FIX: Only apply intent sniffer for certain states, not when we're expecting specific input
-    if (!["pickup_pin", "drop_pin", "units", "weight", "dims", "invoice", "payamount"].includes(st)) {
-        // Capture courier type / mode / unit only when not expecting numeric input
-        if (["b2b", "b2c"].includes(lower)) d.courier_type = lower === "b2b" ? "B2B" : "B2C";
-        if (["surface", "air", "railway"].includes(lower)) d.mode_name = lower;
-        if (["cm", "in"].includes(lower)) d.unit = lower.toUpperCase();
-
-        // Capture payment type by title or payload
-        if (["0", "1", "2", "prepaid", "cod", "to-pay", "to pay"].includes(lower)) {
-            d.shipment_payment_type = ["prepaid", "cod", "to-pay", "to pay"].includes(lower)
-                ? ({ prepaid: "0", cod: "1", "to-pay": "2", "to pay": "2" }[lower])
-                : raw;
-        }
-    }
-
-    // 🔧 FIX: Always capture pincodes regardless of state
-    if (/^\d{6}$/.test(raw)) {
-        if (!d.pickup_pin) {
-            d.pickup_pin = raw;
-        } else if (!d.drop_pin) {
-            d.drop_pin = raw;
-        }
-    }
-
-    // Let users type OK anywhere to jump to confirmation
-    if (lower === "ok") session.rateStatus = "confirm";
-
-    // shortcuts
+    // 🔧 FIX: Handle restart first
     if (lower === "restart") {
         session.operation = null;
         session.rateStatus = "init";
@@ -149,7 +124,64 @@ export default async function rateCalcHelper(phone, msg = "") {
         return sendMessage(phone, "Restarted. Enter *Origin Pincode*:");
     }
 
-    session.operation ||= "ratecalc";
+    // 🔧 FIX: Handle OK command - only process in confirm state or when all data is complete
+    if (lower === "ok") {
+        const missing = nextMissing(d);
+        if (!missing) {
+            session.rateStatus = "confirm";
+            await session.save();
+            // Continue to confirmation processing
+        } else {
+            // If missing fields, jump to the first missing field
+            session.rateStatus = missing.s;
+            await session.save();
+            return sendMessage(phone, missing.p);
+        }
+    }
+
+    // 🔧 FIX: Simplified intent sniffer - only capture specific values in appropriate states
+    if (/^\d{6}$/.test(raw)) {
+        if (!d.pickup_pin) {
+            d.pickup_pin = raw;
+        } else if (!d.drop_pin) {
+            d.drop_pin = raw;
+        }
+    }
+
+    // Only capture these values when not in specific input states
+    if (!["pickup_pin", "drop_pin", "units", "weight", "dims", "invoice", "payamount"].includes(currentState)) {
+        if (["b2b", "b2c"].includes(lower)) {
+            d.courier_type = lower === "b2b" ? "B2B" : "B2C";
+        }
+        if (["surface", "air", "railway"].includes(lower)) {
+            d.mode_name = lower;
+        }
+        if (["cm", "in"].includes(lower)) {
+            d.unit = lower.toUpperCase();
+        }
+        if (["0", "1", "2", "prepaid", "cod", "to-pay", "to pay"].includes(lower)) {
+            d.shipment_payment_type = ["prepaid", "cod", "to-pay", "to pay"].includes(lower)
+                ? ({ prepaid: "0", cod: "1", "to-pay": "2", "to pay": "2" }[lower])
+                : raw;
+        }
+    }
+
+    // Capture numeric values for units only when appropriate
+    if (/^\d+$/.test(raw) && !d.units && Number(raw) > 0 && Number(raw) < 10000) {
+        d.units = Number(raw);
+    }
+
+    await session.save();
+
+    // 🔧 FIX: Check for missing fields and jump to them if needed
+    const missingNow = nextMissing(d);
+    if (missingNow && !["confirm", "fetching", "done"].includes(currentState)) {
+        session.rateStatus = missingNow.state;
+        await session.save();
+        return sendMessage(phone, missingNow.p);
+    }
+
+    let st = session.rateStatus;
 
     switch (st) {
         case "init":
@@ -216,12 +248,18 @@ export default async function rateCalcHelper(phone, msg = "") {
             d.weight = w;
             session.rateStatus = "dimension";
             await session.save();
-            return sendQuickReplies(phone, [{ title: "CM", postbackText: "CM" }, { title: "IN", postbackText: "IN" }], "Select *Dimension Unit* for L×W×H:");
+            return sendQuickReplies(phone,
+                [{ title: "CM", postbackText: "CM" }, { title: "IN", postbackText: "IN" }],
+                "Select *Dimension Unit* for L×W×H:"
+            );
         }
 
         case "dimension": {
             const unit = ["cm", "in"].includes(lower) ? lower.toUpperCase() : null;
-            if (!unit) return sendQuickReplies(phone, [{ title: "CM", postbackText: "CM" }, { title: "IN", postbackText: "IN" }], "Pick *CM* or *IN*:");
+            if (!unit) return sendQuickReplies(phone,
+                [{ title: "CM", postbackText: "CM" }, { title: "IN", postbackText: "IN" }],
+                "Pick *CM* or *IN*:"
+            );
             d.unit = unit;
             session.rateStatus = "dims";
             await session.save();
@@ -273,12 +311,14 @@ export default async function rateCalcHelper(phone, msg = "") {
         }
 
         case "confirm": {
+            // 🔧 FIX: Double-check all required fields are present
             const miss = nextMissing(d);
             if (miss) {
                 session.rateStatus = miss.s;
                 await session.save();
                 return sendMessage(phone, miss.p);
             }
+
             try {
                 const payload = buildPayload(d);
                 session.rateStatus = "fetching";
@@ -290,26 +330,54 @@ export default async function rateCalcHelper(phone, msg = "") {
                     const item = val || {};
                     const gt = item?.logistos_working?.grand_total ?? item?.rates;
                     const num = typeof gt === "number" ? gt : Number.isFinite(+gt) ? +gt : null;
-                    return { partner: item.delivery_partner || key.split("-")[0], mode: item.mode_name || payload.mode_name, grand_total: num, tat: item.tat || item.avg_delivery_days || "", w: item.logistos_working || {} };
+                    return {
+                        partner: item.delivery_partner || key.split("-")[0],
+                        mode: item.mode_name || payload.mode_name,
+                        grand_total: num,
+                        tat: item.tat || item.avg_delivery_days || "",
+                        w: item.logistos_working || {}
+                    };
                 }).filter(r => Number.isFinite(r.grand_total));
 
                 if (!rows.length) {
                     session.rateStatus = "done";
                     await session.save();
                     await sendMessage(phone, "No payable options returned for this route/inputs.");
-                    return sendQuickReplies(phone, [{ title: "Recalculate", postbackText: "rate" }, { title: "Book a Shipment", postbackText: "book" }], "What next?");
+                    return sendQuickReplies(phone,
+                        [{ title: "Recalculate", postbackText: "rate" }, { title: "Book a Shipment", postbackText: "book" }],
+                        "What next?"
+                    );
                 }
 
                 rows.sort((a, b) => a.grand_total - b.grand_total);
                 const top = rows.slice(0, 5);
-                const lines = top.map((r, i) => `${i === 0 ? "🏆" : "•"} ${r.partner} (${r.mode}) — ₹${r.grand_total.toFixed(0)}${r.tat ? ` — TAT: ${r.tat}d` : ""}`).join("\n");
+                const lines = top.map((r, i) =>
+                    `${i === 0 ? "🏆" : "•"} ${r.partner} (${r.mode}) — ₹${r.grand_total.toFixed(0)}${r.tat ? ` — TAT: ${r.tat}d` : ""}`
+                ).join("\n");
+
                 const best = top[0];
                 const w = best.w || {};
-                const breakdown = [w.freight && `Freight: ₹${w.freight}`, w.fsc && `FSC: ₹${w.fsc}`, w.oda && `ODA: ₹${w.oda}`, w.fm_charges && `FM: ₹${w.fm_charges}`, w.handling_charges && `Handling: ₹${w.handling_charges}`, w.gst && `GST: ₹${typeof w.gst === "number" ? w.gst.toFixed(2) : w.gst}`].filter(Boolean).join(" | ");
+                const breakdown = [
+                    w.freight && `Freight: ₹${w.freight}`,
+                    w.fsc && `FSC: ₹${w.fsc}`,
+                    w.oda && `ODA: ₹${w.oda}`,
+                    w.fm_charges && `FM: ₹${w.fm_charges}`,
+                    w.handling_charges && `Handling: ₹${w.handling_charges}`,
+                    w.gst && `GST: ₹${typeof w.gst === "number" ? w.gst.toFixed(2) : w.gst}`
+                ].filter(Boolean).join(" | ");
 
-                await sendMessage(phone, `📦 *Rate Comparison*\nFrom ${d.pickup_pin} ➝ ${d.drop_pin}\nType: *${d.courier_type}*, Mode: *${best.mode}*\nQty: *${d.units}*, Wt/box: *${d.weight} KG*\nDims: *${d.length}×${d.width}×${d.height} ${d.unit}*\nInvoice: *₹${d.invoice_value}*, Pay: *${d.shipment_payment_type === "0" ? "Prepaid" : d.shipment_payment_type === "1" ? "COD" : "TO-PAY"}*\n\n${lines}\n\n*Best Option:* ${best.partner} — *₹${best.grand_total.toFixed(0)}*\n${breakdown ? `_${breakdown}_` : ""}`);
+                await sendMessage(phone,
+                    `📦 *Rate Comparison*\nFrom ${d.pickup_pin} ➝ ${d.drop_pin}\nType: *${d.courier_type}*, Mode: *${best.mode}*\nQty: *${d.units}*, Wt/box: *${d.weight} KG*\nDims: *${d.length}×${d.width}×${d.height} ${d.unit}*\nInvoice: *₹${d.invoice_value}*, Pay: *${d.shipment_payment_type === "0" ? "Prepaid" : d.shipment_payment_type === "1" ? "COD" : "TO-PAY"}*\n\n${lines}\n\n*Best Option:* ${best.partner} — *₹${best.grand_total.toFixed(0)}*\n${breakdown ? `_${breakdown}_` : ""}`
+                );
 
-                await sendQuickReplies(phone, [{ title: "Recalculate", postbackText: "rate" }, { title: "Book a Shipment", postbackText: "book" }, { title: "Track an Order", postbackText: "track" }], "What next?");
+                await sendQuickReplies(phone,
+                    [
+                        { title: "Recalculate", postbackText: "rate" },
+                        { title: "Book a Shipment", postbackText: "book" },
+                        { title: "Track an Order", postbackText: "track" }
+                    ],
+                    "What next?"
+                );
 
                 session.rateStatus = "done";
                 session.operation = null;
@@ -328,7 +396,14 @@ export default async function rateCalcHelper(phone, msg = "") {
             return sendMessage(phone, "Still working… type *restart* to start over.");
 
         case "done":
-            return sendQuickReplies(phone, [{ title: "Recalculate", postbackText: "rate" }, { title: "Book a Shipment", postbackText: "book" }, { title: "Track an Order", postbackText: "track" }], "All set. What next?");
+            return sendQuickReplies(phone,
+                [
+                    { title: "Recalculate", postbackText: "rate" },
+                    { title: "Book a Shipment", postbackText: "book" },
+                    { title: "Track an Order", postbackText: "track" }
+                ],
+                "All set. What next?"
+            );
 
         default:
             return sendMessage(phone, "Type *restart* to begin a new rate calculation.");
