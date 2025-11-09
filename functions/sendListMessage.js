@@ -1,9 +1,53 @@
 // functions/sendListMessage.js
 import axios from "axios";
 
-function normalizeRows(textArray = []) {
-  // Accept: "Track an Order" OR { title, postbackText, description }
-  return textArray.slice(0, 10).map((row, i) => {
+/**
+ * Accepts BOTH of these signatures:
+ *  A) sendListMessage(to, header, body, options[, footer, buttonText])
+ *  B) sendListMessage(to, options, body?, footer?, buttonText?)
+ *     (used when you passed the options as the 2nd arg)
+ */
+export default async function sendListMessage(
+  to,
+  headerOrOptions,
+  bodyOrHeader,
+  optionsMaybe,
+  footerMaybe,
+  buttonMaybe
+) {
+  const apikey = process.env.GUPSHUP_API_KEY;
+  const source = process.env.GUPSHUP_SOURCE_NUMBER;
+  const appName = process.env.GUPSHUP_BOT_NAME || "Logistos Bot";
+
+  if (!apikey || !source) {
+    console.error("❌ Gupshup creds missing: GUPSHUP_API_KEY/GUPSHUP_SOURCE_NUMBER");
+    return;
+  }
+
+  // ---- Parameter normalization (supports both signatures) ----
+  let headerText = "";
+  let bodyText = "Choose one:";
+  let options = [];
+  let footerText = "";
+  let buttonText = "Open menu";
+
+  if (Array.isArray(headerOrOptions)) {
+    // Signature B
+    options = headerOrOptions;
+    bodyText = typeof bodyOrHeader === "string" ? bodyOrHeader : "Choose one:";
+    footerText = typeof optionsMaybe === "string" ? optionsMaybe : "";
+    buttonText = typeof footerMaybe === "string" ? footerMaybe : "Open menu";
+  } else {
+    // Signature A
+    headerText = typeof headerOrOptions === "string" ? headerOrOptions : "";
+    bodyText = typeof bodyOrHeader === "string" ? bodyOrHeader : "Choose one:";
+    options = Array.isArray(optionsMaybe) ? optionsMaybe : [];
+    footerText = typeof footerMaybe === "string" ? footerMaybe : "";
+    buttonText = typeof buttonMaybe === "string" ? buttonMaybe : "Open menu";
+  }
+
+  // ---- Normalize rows (strings OR {title, postbackText, description}) ----
+  const rows = (options || []).slice(0, 10).map((row, i) => {
     if (typeof row === "string") {
       return { id: row, title: row };
     }
@@ -13,63 +57,41 @@ function normalizeRows(textArray = []) {
       ...(row.description ? { description: String(row.description) } : {}),
     };
   });
-}
-
-/**
- * Keep your existing signature: (to, header, body, textArray)
- * - Use when you have 4–10 options.
- */
-export default async function sendListMessage(to, header, body, textArray) {
-  const apikey = process.env.GUPSHUP_API_KEY;
-  const source = process.env.GUPSHUP_SOURCE_NUMBER;
-  const appName = process.env.GUPSHUP_BOT_NAME;
-
-  if (!apikey || !source) {
-    console.error("❌ Gupshup creds missing: GUPSHUP_API_KEY/GUPSHUP_SOURCE_NUMBER");
-    return;
-  }
-
-  const rows = normalizeRows(textArray);
 
   const payload = new URLSearchParams({
     source,
     destination: to,
-    "src.name": appName || "Logistos Bot",
+    "src.name": appName,
     message: JSON.stringify({
       type: "list",
-      title: header,         // header text
-      body,                  // body text
-      msgid: `list_${Date.now()}`, // uniqueish id
-      globalButtons: [{ type: "text", title: "Choose an option" }],
+      title: headerText,                 // list header (top bold line)
+      body: bodyText,                    // list body
+      msgid: `list_${Date.now()}`,
+      globalButtons: [{ type: "text", title: buttonText }],
       items: [
         {
           title: "Options",
-          options: rows.map(r => ({
+          options: rows.map((r) => ({
             type: "text",
             title: r.title,
             ...(r.description ? { description: r.description } : {}),
-            postbackText: r.id
-          }))
-        }
-      ]
-    })
+            postbackText: r.id,          // this is what you’ll receive back
+          })),
+        },
+      ],
+    }),
   });
 
   try {
     console.log(`📤 Sending list to ${to}: ${JSON.stringify(rows.map(r => r.title))}`);
-    const res = await axios.post(
-      "https://api.gupshup.io/wa/api/v1/msg",
-      payload,
-      {
-        headers: {
-          "Content-Type": "application/x-www-form-urlencoded",
-          apikey,
-        },
-        timeout: 15000,
-      }
-    );
+    const res = await axios.post("https://api.gupshup.io/wa/api/v1/msg", payload, {
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        apikey,
+      },
+      timeout: 15000,
+    });
     console.log("✅ List response:", JSON.stringify(res.data));
-    console.log(`📤 Sent list message to ${to} with ${rows.length} items`);
     return res.data;
   } catch (err) {
     console.error("❌ Send list error:", err.response?.data || err.message);

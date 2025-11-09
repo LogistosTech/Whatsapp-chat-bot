@@ -15,6 +15,7 @@ import getMyDetailsAPI from "./APIS/getMyDetailsAPI.js";
 import { signupUser } from "./helpers/signupHelper.js";
 import ticketCreateHelper, { startTicketFlow } from "./helpers/ticketCreateHelper.js";
 import sendListMessage from "./functions/sendListMessage.js";
+import rateCalcHelper,  { startRateFlow } from "./helpers/rateCalcHelper.js";
 
 dotenv.config();
 const app = express();
@@ -112,10 +113,24 @@ app.post("/webhook", async (req, res) => {
 
     console.log(`📥 Received from ${phone}: ${msg}`);
 
+    // Deduplicate re-deliveries
+    const incomingId = messageObj?.id || messageObj?.key?.id || "";
+
     // Load or create session
     let session = await Session.findOne({ phone });
     if (!session) {
       session = await Session.create({ phone, state: "start" });
+    }
+
+    // If same WA message ID already processed, just ACK to stop retries
+    if (incomingId && session.lastMsgId === incomingId) {
+      console.log("↩️  Duplicate message detected, skipping:", incomingId);
+      return res.sendStatus(200);
+    }
+    // Save it right away so retries won’t re-run logic
+    if (incomingId) {
+      session.lastMsgId = incomingId;
+      await session.save();
     }
 
     /* -----------------------------
@@ -273,8 +288,10 @@ app.post("/webhook", async (req, res) => {
           { headers: { "Content-Type": "application/json" } }
         );
 
+        // after successful login
         session.token = loginRes.data.access;
-        session.state = "authenticated";
+        session.state = 'authenticated';
+        session.expiresAt = new Date(Date.now() + 48 * 60 * 60 * 1000); // 48h
         await session.save();
 
         await getMyDetailsAPI(phone);
@@ -282,8 +299,9 @@ app.post("/webhook", async (req, res) => {
         await sendListMessage(
           phone,
           [
-            { title: "Book a Shipment", postbackText: "book" },
+            // { title: "Book a Shipment", postbackText: "book" },
             { title: "Track an Order", postbackText: "track" },
+            { title: "Rate Calculator", postbackText: "rate" },
             { title: "Create Ticket", postbackText: "ticket" },
             { title: "Logout", postbackText: "logout" },
           ],
@@ -345,11 +363,23 @@ app.post("/webhook", async (req, res) => {
         return res.sendStatus(200);
       }
 
+      try {
+        if (msg_lower === "rate" && session.operation !== "ratecalc") {
+          await startRateFlow(phone, session);
+        } else {
+          await rateCalcHelper(phone, msg);
+        }
+      } catch (err) {
+        console.error("❌ Rate flow error:", err?.response?.data || err.message);
+      }
+      return res.sendStatus(200);
+
       // default authenticated menu
       await sendQuickReplies(
         phone,
         [
-          { title: "Book a Shipment", postbackText: "book" },
+          // { title: "Book a Shipment", postbackText: "book" },
+          { title: "Rate Calculator", postbackText: "rate" },
           { title: "Track an Order", postbackText: "track" },
           { title: "Create Ticket", postbackText: "ticket" },
           { title: "Logout", postbackText: "logout" },
