@@ -116,12 +116,12 @@ export default async function rateCalcHelper(phone, msg = "") {
     const currentState = session.rateStatus;
 
     // 🔧 FIX: Handle restart first
-    if (lower === "restart") {
+    if (lower === "restart" || lower === "rate") {
         session.operation = null;
         session.rateStatus = "init";
         session.rateDraft = {};
         await session.save();
-        return sendMessage(phone, "Restarted. Enter *Origin Pincode*:");
+        return sendMessage(phone, "Let’s calculate rates. Enter *Origin Pincode*:");
     }
 
     // 🔧 FIX: Handle OK command - only process in confirm state or when all data is complete
@@ -141,11 +141,8 @@ export default async function rateCalcHelper(phone, msg = "") {
 
     // 🔧 FIX: Simplified intent sniffer - only capture specific values in appropriate states
     if (/^\d{6}$/.test(raw)) {
-        if (!d.pickup_pin) {
-            d.pickup_pin = raw;
-        } else if (!d.drop_pin) {
-            d.drop_pin = raw;
-        }
+        if (currentState === "pickup_pin" && !d.pickup_pin) d.pickup_pin = raw;
+        else if (currentState === "drop_pin" && !d.drop_pin) d.drop_pin = raw;
     }
 
     // Only capture these values when not in specific input states
@@ -176,7 +173,7 @@ export default async function rateCalcHelper(phone, msg = "") {
     // 🔧 FIX: Check for missing fields and jump to them if needed
     const missingNow = nextMissing(d);
     if (missingNow && !["confirm", "fetching", "done"].includes(currentState)) {
-        session.rateStatus = missingNow.state;
+        session.rateStatus = missingNow.s;
         await session.save();
         return sendMessage(phone, missingNow.p);
     }
