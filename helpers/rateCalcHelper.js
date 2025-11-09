@@ -157,7 +157,6 @@ export default async function rateCalcHelper(phone, msg = "") {
 
     session.operation ||= "ratecalc";
     session.rateDraft ||= {};
-    const d = session.rateDraft;
 
     // 🔎 intent sniffer — allow out-of-order replies
     if (/^\d{6}$/.test(raw)) {
