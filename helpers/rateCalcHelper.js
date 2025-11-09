@@ -91,7 +91,6 @@ function nextMissing(d) {
     return null;
 }
 
-// put this near the top or anywhere outside the switch
 export async function startRateFlow(phone, session) {
     session.operation = "ratecalc";
     session.rateStatus = "pickup_pin";
@@ -107,60 +106,39 @@ export default async function rateCalcHelper(phone, msg = "") {
 
     const raw = String(msg || "").trim();
     const lower = raw.toLowerCase();
-    
-    // Map the first missing field to the appropriate state (no full reset)
-    function nextStateForMissing(d) {
-        if (!/^\d{6}$/.test(String(d.pickup_pin || ""))) return { state: "pickup_pin", prompt: "Enter *Origin Pincode*:" };
-        if (!/^\d{6}$/.test(String(d.drop_pin || ""))) return { state: "drop_pin", prompt: "Enter *Destination Pincode*:" };
-        if (!d.courier_type) return { state: "courier_type", prompt: "Select *Courier Type*:" };
-        if (!d.mode_name) return { state: "mode", prompt: "Select *Mode*:" };
-        if (!d.units) return { state: "units", prompt: "Enter *Box Count*:" };
-        if (!d.weight) return { state: "weight", prompt: "Enter *Weight per Box in KG* (e.g., 5):" };
-        if (!d.unit) return { state: "dimension", prompt: "Select *Dimension Unit* for L×W×H:" };
-        if (!d.length || !d.width || !d.height)
-            return { state: "dims", prompt: "Send *Length x Width x Height* (e.g., `30x20x15`):" };
-        if (typeof d.invoice_value !== "number")
-            return { state: "invoice", prompt: "Enter *Declared Value (₹)*:" };
-        return null;
-    }
 
-    // 🔎 Intent sniffer — store out-of-order replies without changing state
+    // 🔧 FIX: Simplified intent sniffer - only process if not in a specific state
     session.rateDraft ||= {};
     const d = session.rateDraft;
 
-    // Capture pincodes (first is pickup, second is drop)
+    let st = session.rateStatus || "init";
+
+    // 🔧 FIX: Only apply intent sniffer for certain states, not when we're expecting specific input
+    if (!["pickup_pin", "drop_pin", "units", "weight", "dims", "invoice", "payamount"].includes(st)) {
+        // Capture courier type / mode / unit only when not expecting numeric input
+        if (["b2b", "b2c"].includes(lower)) d.courier_type = lower === "b2b" ? "B2B" : "B2C";
+        if (["surface", "air", "railway"].includes(lower)) d.mode_name = lower;
+        if (["cm", "in"].includes(lower)) d.unit = lower.toUpperCase();
+
+        // Capture payment type by title or payload
+        if (["0", "1", "2", "prepaid", "cod", "to-pay", "to pay"].includes(lower)) {
+            d.shipment_payment_type = ["prepaid", "cod", "to-pay", "to pay"].includes(lower)
+                ? ({ prepaid: "0", cod: "1", "to-pay": "2", "to pay": "2" }[lower])
+                : raw;
+        }
+    }
+
+    // 🔧 FIX: Always capture pincodes regardless of state
     if (/^\d{6}$/.test(raw)) {
-        if (!d.pickup_pin) d.pickup_pin = raw;
-        else if (!d.drop_pin) d.drop_pin = raw;
-    }
-
-    // Capture courier type / mode / unit
-    if (["b2b", "b2c"].includes(lower)) d.courier_type = lower === "b2b" ? "B2B" : "B2C";
-    if (["surface", "air", "railway"].includes(lower)) d.mode_name = lower;
-    if (["cm", "in"].includes(lower)) d.unit = lower.toUpperCase();
-
-    // Capture payment type by title or payload
-    if (["0", "1", "2", "prepaid", "cod", "to-pay", "to pay"].includes(lower)) {
-        d.shipment_payment_type = ["prepaid", "cod", "to-pay", "to pay"].includes(lower)
-            ? ({ prepaid: "0", cod: "1", "to-pay": "2", "to pay": "2" }[lower])
-            : raw;
-    }
-
-    // Opportunistically capture a number as units (only if empty)
-    if (/^\d+$/.test(raw) && !d.units && Number(raw) > 0 && Number(raw) < 10000) {
-        d.units = Number(raw);
+        if (!d.pickup_pin) {
+            d.pickup_pin = raw;
+        } else if (!d.drop_pin) {
+            d.drop_pin = raw;
+        }
     }
 
     // Let users type OK anywhere to jump to confirmation
     if (lower === "ok") session.rateStatus = "confirm";
-
-    // 🚦 Illegal-state normalizer: if an earlier field is missing, jump back to it
-    const missingNow = nextStateForMissing(d);
-    if (missingNow && !["confirm", "fetching", "done"].includes(session.rateStatus)) {
-        session.rateStatus = missingNow.state;
-    }
-    await session.save();
-
 
     // shortcuts
     if (lower === "restart") {
@@ -172,29 +150,7 @@ export default async function rateCalcHelper(phone, msg = "") {
     }
 
     session.operation ||= "ratecalc";
-    session.rateDraft ||= {};
 
-    // 🔎 intent sniffer — allow out-of-order replies
-    if (/^\d{6}$/.test(raw)) {
-        if (!d.pickup_pin) d.pickup_pin = raw; else if (!d.drop_pin) d.drop_pin = raw;
-    }
-    if (["b2b", "b2c"].includes(lower)) d.courier_type = lower === "b2b" ? "B2B" : "B2C";
-    if (["surface", "air", "railway"].includes(lower)) d.mode_name = lower;
-    if (["cm", "in"].includes(lower)) d.unit = lower.toUpperCase();
-    if (["0", "1", "2", "prepaid", "cod", "to-pay", "to pay"].includes(lower)) {
-        d.shipment_payment_type = ["prepaid", "cod", "to-pay", "to pay"].includes(lower)
-            ? { prepaid: "0", cod: "1", "to-pay": "2", "to pay": "2" }[lower]
-            : raw;
-    }
-    // numeric capture (only if not set yet)
-    if (/^\d+$/.test(raw)) {
-        const n = +raw;
-        if (!d.units && n > 0 && n < 10000) d.units = n;
-    }
-    if (lower === "ok") session.rateStatus = "confirm";
-    await session.save();
-
-    let st = session.rateStatus || "init";
     switch (st) {
         case "init":
             session.rateStatus = "pickup_pin";
@@ -274,7 +230,7 @@ export default async function rateCalcHelper(phone, msg = "") {
 
         case "dims": {
             const dims = parseDims(raw);
-            if (!dims) return sendMessage(phone, "Couldn’t read that. Send like *30x20x15* (or 30,20,15)");
+            if (!dims) return sendMessage(phone, "Couldn't read that. Send like *30x20x15* (or 30,20,15)");
             d.length = dims.length;
             d.width = dims.width;
             d.height = dims.height;
@@ -364,7 +320,7 @@ export default async function rateCalcHelper(phone, msg = "") {
                 console.error("❌ Rate calc error:", e?.response?.data || e.message);
                 session.rateStatus = "confirm";
                 await session.save();
-                return sendMessage(phone, "Couldn’t fetch rates. Check inputs or type *restart*.");
+                return sendMessage(phone, "Couldn't fetch rates. Check inputs or type *restart*.");
             }
         }
 
