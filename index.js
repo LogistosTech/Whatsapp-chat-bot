@@ -363,19 +363,16 @@ app.post("/webhook", async (req, res) => {
         return res.sendStatus(200);
       }
 
-      if (
-        msg_lower === "rate" ||
-        msg_lower === "rates" ||
-        msg_lower === "calculator" ||
-        session.operation === "ratecalc"
-      ) {
+      try {
         if (msg_lower === "rate" && session.operation !== "ratecalc") {
           await startRateFlow(phone, session);
         } else {
           await rateCalcHelper(phone, msg);
         }
-        return res.sendStatus(200);
+      } catch (err) {
+        console.error("❌ Rate flow error:", err?.response?.data || err.message);
       }
+      return res.sendStatus(200);
 
       // default authenticated menu
       await sendQuickReplies(
