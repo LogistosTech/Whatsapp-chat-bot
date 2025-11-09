@@ -107,6 +107,44 @@ export default async function rateCalcHelper(phone, msg = "") {
 
     const raw = String(msg || "").trim();
     const lower = raw.toLowerCase();
+    
+    // 🔎 Intent sniffer — allow out-of-order replies without changing state
+    session.rateDraft ||= {};
+    const d = session.rateDraft;
+
+    // Capture pincodes (first is pickup, second is drop)
+    if (/^\d{6}$/.test(raw)) {
+        if (!d.pickup_pin) d.pickup_pin = raw;
+        else if (!d.drop_pin) d.drop_pin = raw;
+    }
+
+    // Capture courier type / mode / unit
+    if (["b2b", "b2c"].includes(lower)) d.courier_type = lower === "b2b" ? "B2B" : "B2C";
+    if (["surface", "air", "railway"].includes(lower)) d.mode_name = lower;
+    if (["cm", "in"].includes(lower)) d.unit = lower.toUpperCase();
+
+    // Capture payment type by title or payload
+    if (["0", "1", "2", "prepaid", "cod", "to-pay", "to pay"].includes(lower)) {
+        d.shipment_payment_type = ["prepaid", "cod", "to-pay", "to pay"].includes(lower)
+            ? ({ prepaid: "0", cod: "1", "to-pay": "2", "to pay": "2" }[lower])
+            : raw;
+    }
+
+    // Opportunistically capture a number as units (only if empty)
+    if (/^\d+$/.test(raw) && !d.units && Number(raw) > 0 && Number(raw) < 10000) {
+        d.units = Number(raw);
+    }
+
+    // If the user types OK anywhere, try to finish
+    if (lower === "ok") session.rateStatus = "confirm";
+
+    // 🚦 Illegal-state normalizer: if we're on a later state but something earlier is missing, jump back
+    const missingNow = nextStateForMissing(d);
+    if (missingNow && !["confirm", "fetching", "done"].includes(session.rateStatus)) {
+        session.rateStatus = missingNow.state;
+    }
+    await session.save();
+
 
     // shortcuts
     if (lower === "restart") {
