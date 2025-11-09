@@ -108,7 +108,23 @@ export default async function rateCalcHelper(phone, msg = "") {
     const raw = String(msg || "").trim();
     const lower = raw.toLowerCase();
     
-    // 🔎 Intent sniffer — allow out-of-order replies without changing state
+    // Map the first missing field to the appropriate state (no full reset)
+    function nextStateForMissing(d) {
+        if (!/^\d{6}$/.test(String(d.pickup_pin || ""))) return { state: "pickup_pin", prompt: "Enter *Origin Pincode*:" };
+        if (!/^\d{6}$/.test(String(d.drop_pin || ""))) return { state: "drop_pin", prompt: "Enter *Destination Pincode*:" };
+        if (!d.courier_type) return { state: "courier_type", prompt: "Select *Courier Type*:" };
+        if (!d.mode_name) return { state: "mode", prompt: "Select *Mode*:" };
+        if (!d.units) return { state: "units", prompt: "Enter *Box Count*:" };
+        if (!d.weight) return { state: "weight", prompt: "Enter *Weight per Box in KG* (e.g., 5):" };
+        if (!d.unit) return { state: "dimension", prompt: "Select *Dimension Unit* for L×W×H:" };
+        if (!d.length || !d.width || !d.height)
+            return { state: "dims", prompt: "Send *Length x Width x Height* (e.g., `30x20x15`):" };
+        if (typeof d.invoice_value !== "number")
+            return { state: "invoice", prompt: "Enter *Declared Value (₹)*:" };
+        return null;
+    }
+
+    // 🔎 Intent sniffer — store out-of-order replies without changing state
     session.rateDraft ||= {};
     const d = session.rateDraft;
 
@@ -135,10 +151,10 @@ export default async function rateCalcHelper(phone, msg = "") {
         d.units = Number(raw);
     }
 
-    // If the user types OK anywhere, try to finish
+    // Let users type OK anywhere to jump to confirmation
     if (lower === "ok") session.rateStatus = "confirm";
 
-    // 🚦 Illegal-state normalizer: if we're on a later state but something earlier is missing, jump back
+    // 🚦 Illegal-state normalizer: if an earlier field is missing, jump back to it
     const missingNow = nextStateForMissing(d);
     if (missingNow && !["confirm", "fetching", "done"].includes(session.rateStatus)) {
         session.rateStatus = missingNow.state;
