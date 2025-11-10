@@ -35,6 +35,13 @@ export async function startSignupFlow(phone, session) {
  * Call this from your webhook whenever session.state starts with "signup."
  */
 export async function handleSignupStep(phone, session, msg, interactiveType, rawPayload = {}) {
+    if (!session.signup) {
+        session.signup = { user_type: "", data: {}, files: {} };
+    }
+    if (!session.state || !session.state.startsWith("signup.")) {
+        session.state = "signup.chooseType";
+    }
+    await session.save();
     const lower = (msg || "").toLowerCase().trim();
 
     // Allow switching back to login
@@ -47,18 +54,16 @@ export async function handleSignupStep(phone, session, msg, interactiveType, raw
 
     // ---- choose type ----
     if (session.state === "signup.chooseType") {
-        if (["type_org", "organization", "signup_organization"].includes(lower)) {
-            session.signup.user_type = "organization";
-        } else if (["type_ind", "individual", "signup_individual"].includes(lower)) {
-            session.signup.user_type = "individual";
-        } else {
-            await sendMessage(phone, "Please choose *Organization* or *Individual*.");
-            return;
-        }
-        session.state = "signup.collect.basic";
-        await session.save();
+        const choose = (t) => {
+            session.signup.user_type = t;
+            session.state = "signup.collect.basic";
+        };
 
-        // Ask basics (mirror web form)  :contentReference[oaicite:0]{index=0}
+        if (["type_org", "organization", "signup_organization"].includes(lower)) choose("organization");
+        else if (["type_ind", "individual", "signup_individual"].includes(lower)) choose("individual");
+        else return await sendMessage(phone, "Please choose *Organization* or *Individual*.");
+
+        await session.save();
         await sendMessage(
             phone,
             session.signup.user_type === "organization"
