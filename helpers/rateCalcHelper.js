@@ -179,7 +179,11 @@ export default async function rateCalcHelper(phone, msg = "") {
 
     // 🔧 FIX: Check for missing fields and jump to them if needed
     const missingNow = nextMissing(d);
-    if (missingNow && !["confirm", "fetching", "done"].includes(currentState)) {
+    if (
+        missingNow &&
+        missingNow.s !== currentState &&          // <-- only re-prompt if it’s a different step
+        !["confirm", "fetching", "done"].includes(currentState)
+    ) {
         session.rateStatus = missingNow.s;
         await session.save();
         return sendMessage(phone, missingNow.p);
