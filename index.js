@@ -12,10 +12,10 @@ import sendQuickReplies from "./functions/sendQuickReplies.js";
 import bookShipmentHelper from "./helpers/bookShipmentHelper.js";
 import trackOrderHelper from "./helpers/trackOrderHelper.js";
 import getMyDetailsAPI from "./APIS/getMyDetailsAPI.js";
-import { signupUser } from "./helpers/signupHelper.js";
+import { startSignupFlow, handleSignupStep } from "./helpers/signupHelper.js";
 import ticketCreateHelper, { startTicketFlow } from "./helpers/ticketCreateHelper.js";
 import sendListMessage from "./functions/sendListMessage.js";
-import rateCalcHelper,  { startRateFlow } from "./helpers/rateCalcHelper.js";
+import rateCalcHelper, { startRateFlow } from "./helpers/rateCalcHelper.js";
 
 dotenv.config();
 const app = express();
@@ -188,74 +188,17 @@ app.post("/webhook", async (req, res) => {
       return res.sendStatus(200);
     }
 
-    // Signup branch
-    if (session.state.startsWith("awaiting_signup")) {
-      if (session.state === "awaiting_signup_type") {
-        if (["signup_individual", "individual"].includes(msg_lower)) {
-          session.signup_type = "individual";
-        } else if (["signup_organization", "organization"].includes(msg_lower)) {
-          session.signup_type = "organization";
-        } else if (msg_lower === "login") {
-          session.state = "awaiting_email";
-          await session.save();
-          await sendMessage(phone, "Redirecting to login. Please enter your *email*.");
-          return res.sendStatus(200);
-        } else {
-          await sendMessage(phone, "⚠️ Please choose a valid option.");
-          return res.sendStatus(200);
-        }
-
-        session.state = "awaiting_signup_details";
-        await session.save();
-
-        if (session.signup_type === "individual") {
-          await sendMessage(phone, "Please enter: First Name, Last Name, Email, Contact Number");
-        } else {
-          await sendMessage(phone, "Please enter: Company Name, Signatory, First Name, Last Name, Email, Contact, GST, PAN");
-        }
-        return res.sendStatus(200);
-      }
-
-      if (session.state === "awaiting_signup_details") {
-        const details = msg.split(",").map(s => s.trim());
-        let payload = {};
-
-        if (session.signup_type === "individual") {
-          payload = {
-            user_first_name: details[0],
-            user_last_name: details[1] || "",
-            user_email: details[2],
-            client_contact_number: details[3],
-            user_type: "individual"
-          };
-        } else {
-          payload = {
-            client_name: details[0],
-            authorised_signatory_name: details[1],
-            user_first_name: details[2],
-            user_last_name: details[3],
-            user_email: details[4],
-            client_contact_number: details[5],
-            gst_no: details[6],
-            pan_no: details[7],
-            user_type: "organization"
-          };
-        }
-
-        try {
-          const signupRes = await signupUser(payload);
-          session.state = "awaiting_email";
-          await session.save();
-
-          await sendMessage(
-            phone,
-            `✅ Signup successful! Your ID: ${signupRes?.id || "N/A"}\nPlease login now.`
-          );
-        } catch {
-          await sendMessage(phone, "❌ Signup failed. Try again later.");
-        }
-        return res.sendStatus(200);
-      }
+    // --- New Signup flow (helper-backed) ---
+    if (msg_lower === "signup" && session.state === "awaiting_login_or_signup") {
+      await startSignupFlow(phone, session);
+      return res.sendStatus(200);
+    }
+    if (session.state && session.state.startsWith("signup.")) {
+      // raw body for media urls in Gupshup
+      const raw = req.body?.payload ? req.body.payload : req.body;
+      const body = typeof raw === "string" ? JSON.parse(raw) : raw || {};
+      await handleSignupStep(phone, session, msg, interactiveType, body);
+      return res.sendStatus(200);
     }
 
     // Login branch
