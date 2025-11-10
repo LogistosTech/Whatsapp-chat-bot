@@ -84,58 +84,83 @@ app.post("/webhook", async (req, res) => {
   try {
     console.log("✅ Webhook hit");
 
-    const entry = req.body?.entry?.[0];
-    const change = entry?.changes?.[0];
-    const value = change?.value;
+    const isMeta = !!req.body?.entry?.[0]?.changes?.[0]?.value;
+    let phone = "";
+    let text = "";
+    let interactiveType = "";
+    let incomingId = "";
 
-    if (!value) {
-      console.warn("⚠️ No value in payload");
-      return res.sendStatus(200);
+    if (isMeta) {
+      const value = req.body.entry[0].changes[0].value;
+
+      if (Array.isArray(value.statuses) && value.statuses.length > 0) {
+        const status = value.statuses[0];
+        const sPhone = status?.recipient_id;
+        console.log(`📦 Message status to ${sPhone}: ${status?.status}`);
+        return res.sendStatus(200);
+      }
+
+      const messageObj = value?.messages?.[0];
+      if (!messageObj) return res.sendStatus(200);
+
+      phone = value?.contacts?.[0]?.wa_id || messageObj?.from || "";
+
+      const extracted = extractIncomingMessage(messageObj);
+      text = extracted.text;
+      interactiveType = extracted.interactiveType;
+
+      incomingId = messageObj?.id || messageObj?.key?.id || "";
+    } else {
+      const raw = req.body?.payload ? req.body.payload : req.body;
+      const body = typeof raw === "string" ? JSON.parse(raw) : raw || {};
+
+      if (body?.type === "message-event" || body?.type === "message-status") {
+        const sPhone = body?.payload?.destination || body?.payload?.phone || body?.phone;
+        const sStatus = body?.payload?.type || body?.payload?.status;
+        console.log(`📦 Message status to ${sPhone}: ${sStatus}`);
+        return res.sendStatus(200);
+      }
+
+      phone = body?.sender?.phone || body?.payload?.source || "";
+      incomingId = body?.messageId || body?.payload?.id || body?.payload?.payloadId || "";
+
+      const p = body?.payload || {};
+      const pType = (p?.type || "").toLowerCase();
+      interactiveType = pType;
+
+      if (pType === "text") {
+        text = (p?.payload?.text || p?.text || "").trim();
+      } else if (pType === "button") {
+        text = (p?.payload?.payload || p?.payload?.title || "").trim();
+      } else if (pType === "list_reply" || pType === "list") {
+        text = (p?.payload?.id || p?.payload?.title || "").trim();
+      } else {
+        text = (p?.text || p?.payload?.text || "").trim();
+      }
     }
 
-    // Status callbacks
-    if (Array.isArray(value.statuses) && value.statuses.length > 0) {
-      const status = value.statuses[0];
-      const phone = status?.recipient_id;
-      console.log(`📦 Message status to ${phone}: ${status?.status}`);
-      return res.sendStatus(200);
-    }
-
-    // Messages
-    const messageObj = value?.messages?.[0];
-    if (!messageObj) return res.sendStatus(200);
-
-    const phone = value?.contacts?.[0]?.wa_id || messageObj?.from;
     if (!phone) return res.sendStatus(200);
 
-    const { text: msg, interactiveType } = extractIncomingMessage(messageObj);
-    const msg_lower = (msg || "").toLowerCase();
+    const msg = (text || "").trim();
+    const msg_lower = msg.toLowerCase();
 
     console.log(`📥 Received from ${phone}: ${msg}`);
 
-    // Deduplicate re-deliveries
-    const incomingId = messageObj?.id || messageObj?.key?.id || "";
-
-    // Load or create session
     let session = await Session.findOne({ phone });
     if (!session) {
       session = await Session.create({ phone, state: "start" });
     }
 
-    // If same WA message ID already processed, just ACK to stop retries
     if (incomingId && session.lastMsgId === incomingId) {
-      console.log("↩️  Duplicate message detected, skipping:", incomingId);
+      console.log("↩️ Duplicate message ID, skipping");
       return res.sendStatus(200);
     }
-    // Save it right away so retries won’t re-run logic
+
     if (incomingId) {
       session.lastMsgId = incomingId;
       await session.save();
     }
 
-    /* -----------------------------
-       START: Welcome
-    ----------------------------- */
     if (session.state === "start" || msg_lower === "hi") {
       session.state = "awaiting_login_or_signup";
       await session.save();
@@ -144,7 +169,7 @@ app.post("/webhook", async (req, res) => {
         phone,
         [
           { title: "Login", postbackText: "login" },
-          { title: "Signup", postbackText: "signup" },
+          { title: "Signup", postbackText: "signup" }
         ],
         "👋 Welcome to Logistos Bot! Do you want to *Login* or *Signup*?",
         "Logistos Bot",
@@ -153,9 +178,6 @@ app.post("/webhook", async (req, res) => {
       return res.sendStatus(200);
     }
 
-    /* -----------------------------
-       LOGIN OR SIGNUP CHOICE
-    ----------------------------- */
     if (session.state === "awaiting_login_or_signup") {
       if (msg_lower === "signup") {
         session.state = "awaiting_signup_type";
@@ -166,7 +188,7 @@ app.post("/webhook", async (req, res) => {
           [
             { title: "Individual", postbackText: "signup_individual" },
             { title: "Organization", postbackText: "signup_organization" },
-            { title: "Back to Login", postbackText: "login" },
+            { title: "Back to Login", postbackText: "login" }
           ],
           "Please select your type:",
           "Logistos Bot",
@@ -186,11 +208,7 @@ app.post("/webhook", async (req, res) => {
       return res.sendStatus(200);
     }
 
-    /* -----------------------------
-       SIGNUP FLOW
-    ----------------------------- */
     if (session.state.startsWith("awaiting_signup")) {
-      // Step 1: type
       if (session.state === "awaiting_signup_type") {
         if (["signup_individual", "individual"].includes(msg_lower)) {
           session.signup_type = "individual";
@@ -202,7 +220,7 @@ app.post("/webhook", async (req, res) => {
           await sendMessage(phone, "Redirecting to login. Please enter your *email*.");
           return res.sendStatus(200);
         } else {
-          await sendMessage(phone, "⚠️ Please choose *Individual*, *Organization*, or *Back to Login*.");
+          await sendMessage(phone, "⚠️ Please choose a valid option.");
           return res.sendStatus(200);
         }
 
@@ -210,19 +228,15 @@ app.post("/webhook", async (req, res) => {
         await session.save();
 
         if (session.signup_type === "individual") {
-          await sendMessage(phone, "Please enter: First Name, Last Name, Email, Contact Number (comma-separated).");
+          await sendMessage(phone, "Please enter: First Name, Last Name, Email, Contact Number");
         } else {
-          await sendMessage(
-            phone,
-            "Please enter: Company Name, Authorized Signatory, First Name, Last Name, Email, Contact, GST No, PAN No (comma-separated)."
-          );
+          await sendMessage(phone, "Please enter: Company Name, Signatory, First Name, Last Name, Email, Contact, GST, PAN");
         }
         return res.sendStatus(200);
       }
 
-      // Step 2: details
       if (session.state === "awaiting_signup_details") {
-        const details = msg.split(",").map((s) => s.trim());
+        const details = msg.split(",").map(s => s.trim());
         let payload = {};
 
         if (session.signup_type === "individual") {
@@ -231,19 +245,19 @@ app.post("/webhook", async (req, res) => {
             user_last_name: details[1] || "",
             user_email: details[2],
             client_contact_number: details[3],
-            user_type: "individual",
+            user_type: "individual"
           };
         } else {
           payload = {
             client_name: details[0],
             authorised_signatory_name: details[1],
             user_first_name: details[2],
-            user_last_name: details[3] || "",
+            user_last_name: details[3],
             user_email: details[4],
             client_contact_number: details[5],
             gst_no: details[6],
             pan_no: details[7],
-            user_type: "organization",
+            user_type: "organization"
           };
         }
 
@@ -254,29 +268,27 @@ app.post("/webhook", async (req, res) => {
 
           await sendMessage(
             phone,
-            `✅ Signup successful! Your ID: ${signupRes?.id || "N/A"}\nPlease login now with your email and password.`
+            `✅ Signup successful! Your ID: ${signupRes?.id || "N/A"}\nPlease login now.`
           );
         } catch (err) {
-          console.error("❌ Signup failed:", err.message);
-          await sendMessage(phone, "❌ Signup failed. Try again later or type 'hi' to restart.");
+          await sendMessage(phone, "❌ Signup failed. Try again later.");
         }
         return res.sendStatus(200);
       }
     }
 
-    /* -----------------------------
-       LOGIN FLOW
-    ----------------------------- */
     if (session.state === "awaiting_email") {
       const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
       if (!emailRegex.test(msg)) {
-        await sendMessage(phone, "⚠️ Please enter a valid *email address*.");
+        await sendMessage(phone, "⚠️ Enter a valid *email*.");
         return res.sendStatus(200);
       }
+
       session.email = msg;
       session.state = "awaiting_password";
       await session.save();
-      await sendMessage(phone, "Got it. Now enter your *password*.");
+
+      await sendMessage(phone, "Enter your *password*.");
       return res.sendStatus(200);
     }
 
@@ -288,10 +300,9 @@ app.post("/webhook", async (req, res) => {
           { headers: { "Content-Type": "application/json" } }
         );
 
-        // after successful login
         session.token = loginRes.data.access;
-        session.state = 'authenticated';
-        session.expiresAt = new Date(Date.now() + 48 * 60 * 60 * 1000); // 48h
+        session.state = "authenticated";
+        session.expiresAt = new Date(Date.now() + 48 * 60 * 60 * 1000);
         await session.save();
 
         await getMyDetailsAPI(phone);
@@ -299,47 +310,36 @@ app.post("/webhook", async (req, res) => {
         await sendListMessage(
           phone,
           [
-            // { title: "Book a Shipment", postbackText: "book" },
             { title: "Track an Order", postbackText: "track" },
             { title: "Rate Calculator", postbackText: "rate" },
             { title: "Create Ticket", postbackText: "ticket" },
-            { title: "Logout", postbackText: "logout" },
+            { title: "Logout", postbackText: "logout" }
           ],
-          "✅ You are already logged in. Choose an option:",
+          "✅ You are logged in. Choose an option:",
           "Logistos Bot",
           "Select",
           "Open menu"
         );
       } catch (err) {
-        console.error("❌ Login failed:", err.message);
         session.state = "awaiting_email";
         await session.save();
-        await sendMessage(phone, "❌ Login failed. Please enter your *email* again.");
+        await sendMessage(phone, "❌ Login failed. Enter email again.");
       }
       return res.sendStatus(200);
     }
 
-    /* -----------------------------
-       AUTHENTICATED USER
-    ----------------------------- */
     if (session.state === "authenticated") {
-      // safer age check
       const referenceTs = session.updatedAt || session.createdAt || new Date();
       const sessionAgeHours = dayjs().diff(dayjs(referenceTs), "hour");
 
       if (sessionAgeHours >= 48) {
         await resetSession(phone);
-        await sendMessage(phone, '⚠️ Session expired. Type "hi" to login again.');
+        await sendMessage(phone, "⚠️ Session expired. Type 'hi' to login again.");
         return res.sendStatus(200);
       }
 
       if (msg_lower === "book" || session.operation === "booking") {
-        try {
-          await bookShipmentHelper(phone, session, msg, interactiveType);
-        } catch (err) {
-          console.error("❌ Booking error:", err.message);
-          await sendMessage(phone, "⚠️ Failed to start booking. Try again.");
-        }
+        await bookShipmentHelper(phone, session, msg, interactiveType);
         return res.sendStatus(200);
       }
 
@@ -350,7 +350,7 @@ app.post("/webhook", async (req, res) => {
 
       if (msg_lower === "logout") {
         await resetSession(phone);
-        await sendMessage(phone, '✅ You have been logged out. Type "hi" to login again.');
+        await sendMessage(phone, "✅ Logged out. Type 'hi' to login.");
         return res.sendStatus(200);
       }
 
@@ -363,42 +363,40 @@ app.post("/webhook", async (req, res) => {
         return res.sendStatus(200);
       }
 
-      try {
-        if (msg_lower === "rate" && session.operation !== "ratecalc") {
-          await startRateFlow(phone, session);
-        } else {
-          await rateCalcHelper(phone, msg);
-        }
-      } catch (err) {
-        console.error("❌ Rate flow error:", err?.response?.data || err.message);
+      if (msg_lower === "rate" && session.operation !== "ratecalc") {
+        await startRateFlow(phone, session);
+        return res.sendStatus(200);
       }
-      return res.sendStatus(200);
 
-      // default authenticated menu
+      if (session.operation === "ratecalc") {
+        await rateCalcHelper(phone, msg);
+        return res.sendStatus(200);
+      }
+
       await sendQuickReplies(
         phone,
         [
-          // { title: "Book a Shipment", postbackText: "book" },
           { title: "Rate Calculator", postbackText: "rate" },
           { title: "Track an Order", postbackText: "track" },
           { title: "Create Ticket", postbackText: "ticket" },
-          { title: "Logout", postbackText: "logout" },
+          { title: "Logout", postbackText: "logout" }
         ],
-        "✅ You are already logged in. Choose an option:",
+        "✅ You are logged in. Choose an option:",
         "Logistos Bot",
         "Select"
       );
       return res.sendStatus(200);
     }
 
-    // Fallback for any other state
     await sendMessage(phone, "⚠️ Sorry, I didn't understand. Type 'hi' to restart.");
     return res.sendStatus(200);
+
   } catch (err) {
-    console.error("❌ Webhook error:", err?.message || err);
+    console.error("❌ Webhook error:", err.message);
     return res.sendStatus(200);
   }
 });
+
 
 /* ----------------------------- */
 /* Start Server                  */
