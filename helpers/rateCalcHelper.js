@@ -309,16 +309,22 @@ export default async function rateCalcHelper(phone, msg = "") {
                 await sendMessage(phone, "Calculating best rates…");
                 const data = await getRatesAPI(phone, payload);
 
+                // Build comparable rows from API response
                 const rows = Object.entries(data || {}).map(([key, val]) => {
                     const item = val || {};
                     const gt = item?.logistos_working?.grand_total ?? item?.rates;
                     const num = typeof gt === "number" ? gt : Number.isFinite(+gt) ? +gt : null;
+
+                    // Normalize TAT (prefer numeric days if present)
+                    const tatRaw = item.tat ?? item.avg_delivery_days ?? "";
+                    const tatNum = Number.isFinite(+tatRaw) ? +tatRaw : null;
+
                     return {
                         partner: item.delivery_partner || key.split("-")[0],
-                        mode: item.mode_name || payload.mode_name,
-                        grand_total: num,
-                        tat: item.tat || item.avg_delivery_days || "",
-                        w: item.logistos_working || {},
+                        mode: (item.mode_name || payload.mode_name || "").toLowerCase(),
+                        grand_total: num,               // number
+                        tat: tatNum,                    // number | null
+                        breakdown: item.logistos_working || {},
                     };
                 }).filter(r => Number.isFinite(r.grand_total));
 
@@ -327,6 +333,7 @@ export default async function rateCalcHelper(phone, msg = "") {
                     session.operation = null;
                     session.rateDraft = {};
                     await session.save();
+
                     await sendMessage(phone, "No payable options returned for this route/inputs.");
                     return sendQuickReplies(
                         phone,
@@ -335,28 +342,48 @@ export default async function rateCalcHelper(phone, msg = "") {
                     );
                 }
 
-                rows.sort((a, b) => a.grand_total - b.grand_total);
-                const top = rows.slice(0, 5);
-                const lines = top.map((r, i) =>
-                    `${i === 0 ? "🏆" : "•"} ${r.partner} (${r.mode}) — ₹${r.grand_total.toFixed(0)}${r.tat ? ` — TAT: ${r.tat}d` : ""}`
-                ).join("\n");
+                // Helpers
+                const fmtMoney = (n) => `₹${Math.round(n).toString()}`;
+                const fmtTat = (n) => (Number.isFinite(n) ? `${n}d` : "—");
 
-                const best = top[0];
-                const w = best.w || {};
-                const breakdown = [
-                    w.freight && `Freight: ₹${w.freight}`,
-                    w.fsc && `FSC: ₹${w.fsc}`,
-                    w.oda && `ODA: ₹${w.oda}`,
-                    w.fm_charges && `FM: ₹${w.fm_charges}`,
-                    w.handling_charges && `Handling: ₹${w.handling_charges}`,
-                    w.gst && `GST: ₹${typeof w.gst === "number" ? w.gst.toFixed(2) : w.gst}`,
-                ].filter(Boolean).join(" | ");
+                // Cheapest (by price)
+                const cheapest = rows.reduce((a, b) => (a.grand_total <= b.grand_total ? a : b));
+
+                // Fastest (by TAT, if any TAT available)
+                const rowsWithTat = rows.filter(r => Number.isFinite(r.tat));
+                const fastest = rowsWithTat.length
+                    ? rowsWithTat.reduce((a, b) => (a.tat <= b.tat ? a : b))
+                    : null;
+
+                // Top N by price
+                const topN = Math.min(4, rows.length);
+                const top = rows.slice().sort((a, b) => a.grand_total - b.grand_total).slice(0, topN);
+
+                // Compose message
+                const header =
+                    `📦 *Rate Comparison*\n` +
+                    `From ${d.pickup_pin} ➝ ${d.drop_pin}\n` +
+                    `Type: *${d.courier_type}* • Mode: *${(d.mode_name || "").toUpperCase()}*\n` +
+                    `Qty: *${d.units || 1}* • Wt/box: *${d.weight} KG*\n` +
+                    `Dims: *${d.length}×${d.width}×${d.height} ${d.unit}* • Invoice: *₹${d.invoice_value}*`;
+
+                const cheapestLine = `🏆 *Cheapest:* ${cheapest.partner} (${cheapest.mode}) — *${fmtMoney(cheapest.grand_total)}* • TAT: ${fmtTat(cheapest.tat)}`;
+                const fastestLine = fastest
+                    ? `🚀 *Fastest:* ${fastest.partner} (${fastest.mode}) — *${fmtMoney(fastest.grand_total)}* • TAT: ${fmtTat(fastest.tat)}`
+                    : `🚀 *Fastest:* Not available (TAT missing from carriers)`;
+
+                const topLines = top
+                    .map((r, i) => `${i + 1}. ${r.partner} (${r.mode}) — ${fmtMoney(r.grand_total)} • TAT: ${fmtTat(r.tat)}`)
+                    .join("\n");
+
+                const note = `_Prices shown use the provider’s grand total when available; TAT is carrier-reported and may vary by route._`;
 
                 await sendMessage(
                     phone,
-                    `📦 *Rate Comparison*\nFrom ${d.pickup_pin} ➝ ${d.drop_pin}\nType: *${d.courier_type}*, Mode: *${best.mode}*\nQty: *${d.units || 1}*, Wt/box: *${d.weight} KG*\nDims: *${d.length}×${d.width}×${d.height} ${d.unit}*\nInvoice: *₹${d.invoice_value}*, Pay: *${d.shipment_payment_type === "0" ? "Prepaid" : d.shipment_payment_type === "1" ? "COD" : "TO-PAY"}*\n\n${lines}\n\n*Best Option:* ${best.partner} — *₹${best.grand_total.toFixed(0)}*\n${breakdown ? `_${breakdown}_` : ""}`
+                    `${header}\n\n${cheapestLine}\n${fastestLine}\n\n🔝 *Top Options*\n${topLines}\n\n${note}`
                 );
 
+                // Reset flow
                 session.rateStatus = "done";
                 session.operation = null;
                 session.rateDraft = {};
@@ -366,9 +393,8 @@ export default async function rateCalcHelper(phone, msg = "") {
                     phone,
                     [
                         { title: "Recalculate", postbackText: "rate" },
+                        { title: "Book a Shipment", postbackText: "book" },
                         { title: "Track an Order", postbackText: "track" },
-                        { title: "Create Ticket", postbackText: "ticket" },
-                        { title: "Logout", postbackText: "logout" }
                     ],
                     "What next?"
                 );
