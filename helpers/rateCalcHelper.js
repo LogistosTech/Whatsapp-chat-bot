@@ -366,8 +366,9 @@ export default async function rateCalcHelper(phone, msg = "") {
                     phone,
                     [
                         { title: "Recalculate", postbackText: "rate" },
-                        { title: "Book a Shipment", postbackText: "book" },
                         { title: "Track an Order", postbackText: "track" },
+                        { title: "Create Ticket", postbackText: "ticket" },
+                        { title: "Logout", postbackText: "logout" }
                     ],
                     "What next?"
                 );
@@ -387,8 +388,9 @@ export default async function rateCalcHelper(phone, msg = "") {
                 phone,
                 [
                     { title: "Recalculate", postbackText: "rate" },
-                    { title: "Book a Shipment", postbackText: "book" },
                     { title: "Track an Order", postbackText: "track" },
+                    { title: "Create Ticket", postbackText: "ticket" },
+                    { title: "Logout", postbackText: "logout" }
                 ],
                 "All set. What next?"
             );

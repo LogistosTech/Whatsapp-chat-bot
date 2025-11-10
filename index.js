@@ -322,8 +322,8 @@ app.post("/webhook", async (req, res) => {
         await sendListMessage(
           phone,
           [
-            { title: "Track an Order", postbackText: "track" },
             { title: "Rate Calculator", postbackText: "rate" },
+            { title: "Track an Order", postbackText: "track" },
             { title: "Create Ticket", postbackText: "ticket" },
             { title: "Logout", postbackText: "logout" }
           ],
