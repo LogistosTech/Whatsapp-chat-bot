@@ -99,6 +99,13 @@ export async function startRateFlow(phone, session) {
     await sendMessage(phone, "Enter *Origin Pincode*:");
 }
 
+const saveDraft = async (session, d) => {
+    session.rateDraft = d;
+    session.markModified("rateDraft");
+    await session.save();
+};
+
+
 export default async function rateCalcHelper(phone, msg = "") {
     const Session = (await import("../models/sessionModel.js")).default;
     let session = await Session.findOne({ phone });
@@ -121,7 +128,7 @@ export default async function rateCalcHelper(phone, msg = "") {
         session.rateStatus = "init";
         session.rateDraft = {};
         await session.save();
-        return sendMessage(phone, "Let’s calculate rates. Enter *Origin Pincode*:");
+        // return sendMessage(phone, "Let’s calculate rates. Enter *Origin Pincode*:");
     }
 
     // 🔧 FIX: Handle OK command - only process in confirm state or when all data is complete
@@ -168,7 +175,7 @@ export default async function rateCalcHelper(phone, msg = "") {
         d.units = Number(raw);
     }
 
-    await session.save();
+    await saveDraft(session, d);
 
     // 🔧 FIX: Check for missing fields and jump to them if needed
     const missingNow = nextMissing(d);
@@ -190,7 +197,7 @@ export default async function rateCalcHelper(phone, msg = "") {
             if (!/^\d{6}$/.test(raw)) return sendMessage(phone, "Please enter a valid 6-digit *Origin Pincode*:");
             d.pickup_pin = raw;
             session.rateStatus = "drop_pin";
-            await session.save();
+            await saveDraft(session, d);
             return sendMessage(phone, "Enter *Destination Pincode*:");
         }
 
@@ -198,7 +205,7 @@ export default async function rateCalcHelper(phone, msg = "") {
             if (!/^\d{6}$/.test(raw)) return sendMessage(phone, "Please enter a valid 6-digit *Destination Pincode*:");
             d.drop_pin = raw;
             session.rateStatus = "courier_type";
-            await session.save();
+            await saveDraft(session, d);
             return sendQuickReplies(phone, COURIER_TYPES, "Select *Courier Type*:");
         }
 
@@ -207,7 +214,7 @@ export default async function rateCalcHelper(phone, msg = "") {
             if (!ct) return sendQuickReplies(phone, COURIER_TYPES, "Pick *B2B* or *B2C*:");
             d.courier_type = ct;
             session.rateStatus = "mode";
-            await session.save();
+            await saveDraft(session, d);
             return sendQuickReplies(phone, MODES, "Select *Mode*:");
         }
 
