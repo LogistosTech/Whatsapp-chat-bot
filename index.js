@@ -30,6 +30,7 @@ mongoose
   .catch((err) => console.error("❌ MongoDB connection error:", err.message));
 
 app.use(bodyParser.json());
+app.use(bodyParser.urlencoded({ extended: true }));
 
 /* ----------------------------- */
 /* Helpers                       */
@@ -84,6 +85,7 @@ app.post("/webhook", async (req, res) => {
   try {
     console.log("✅ Webhook hit");
 
+    // Detect provider shape: Meta vs Gupshup
     const isMeta = !!req.body?.entry?.[0]?.changes?.[0]?.value;
     let phone = "";
     let text = "";
@@ -91,8 +93,10 @@ app.post("/webhook", async (req, res) => {
     let incomingId = "";
 
     if (isMeta) {
+      // Meta (WhatsApp Cloud) payload
       const value = req.body.entry[0].changes[0].value;
 
+      // Delivery statuses
       if (Array.isArray(value.statuses) && value.statuses.length > 0) {
         const status = value.statuses[0];
         const sPhone = status?.recipient_id;
@@ -100,6 +104,7 @@ app.post("/webhook", async (req, res) => {
         return res.sendStatus(200);
       }
 
+      // Inbound message
       const messageObj = value?.messages?.[0];
       if (!messageObj) return res.sendStatus(200);
 
@@ -111,9 +116,11 @@ app.post("/webhook", async (req, res) => {
 
       incomingId = messageObj?.id || messageObj?.key?.id || "";
     } else {
+      // Gupshup payload (often form-encoded with a 'payload' JSON string)
       const raw = req.body?.payload ? req.body.payload : req.body;
       const body = typeof raw === "string" ? JSON.parse(raw) : raw || {};
 
+      // Delivery/status events
       if (body?.type === "message-event" || body?.type === "message-status") {
         const sPhone = body?.payload?.destination || body?.payload?.phone || body?.phone;
         const sStatus = body?.payload?.type || body?.payload?.status;
@@ -121,6 +128,7 @@ app.post("/webhook", async (req, res) => {
         return res.sendStatus(200);
       }
 
+      // Inbound message
       phone = body?.sender?.phone || body?.payload?.source || "";
       incomingId = body?.messageId || body?.payload?.id || body?.payload?.payloadId || "";
 
@@ -146,21 +154,23 @@ app.post("/webhook", async (req, res) => {
 
     console.log(`📥 Received from ${phone}: ${msg}`);
 
+    // Load or create session
     let session = await Session.findOne({ phone });
     if (!session) {
       session = await Session.create({ phone, state: "start" });
     }
 
+    // Deduplicate by provider message id
     if (incomingId && session.lastMsgId === incomingId) {
       console.log("↩️ Duplicate message ID, skipping");
       return res.sendStatus(200);
     }
-
     if (incomingId) {
       session.lastMsgId = incomingId;
       await session.save();
     }
 
+    // Welcome
     if (session.state === "start" || msg_lower === "hi") {
       session.state = "awaiting_login_or_signup";
       await session.save();
@@ -178,36 +188,7 @@ app.post("/webhook", async (req, res) => {
       return res.sendStatus(200);
     }
 
-    if (session.state === "awaiting_login_or_signup") {
-      if (msg_lower === "signup") {
-        session.state = "awaiting_signup_type";
-        await session.save();
-
-        await sendQuickReplies(
-          phone,
-          [
-            { title: "Individual", postbackText: "signup_individual" },
-            { title: "Organization", postbackText: "signup_organization" },
-            { title: "Back to Login", postbackText: "login" }
-          ],
-          "Please select your type:",
-          "Logistos Bot",
-          "Choose type"
-        );
-        return res.sendStatus(200);
-      }
-
-      if (msg_lower === "login") {
-        session.state = "awaiting_email";
-        await session.save();
-        await sendMessage(phone, "Please enter your *email* to login.");
-        return res.sendStatus(200);
-      }
-
-      await sendMessage(phone, "⚠️ Please choose *Login* or *Signup*.");
-      return res.sendStatus(200);
-    }
-
+    // Signup branch
     if (session.state.startsWith("awaiting_signup")) {
       if (session.state === "awaiting_signup_type") {
         if (["signup_individual", "individual"].includes(msg_lower)) {
@@ -270,11 +251,42 @@ app.post("/webhook", async (req, res) => {
             phone,
             `✅ Signup successful! Your ID: ${signupRes?.id || "N/A"}\nPlease login now.`
           );
-        } catch (err) {
+        } catch {
           await sendMessage(phone, "❌ Signup failed. Try again later.");
         }
         return res.sendStatus(200);
       }
+    }
+
+    // Login branch
+    if (session.state === "awaiting_login_or_signup") {
+      if (msg_lower === "signup") {
+        session.state = "awaiting_signup_type";
+        await session.save();
+
+        await sendQuickReplies(
+          phone,
+          [
+            { title: "Individual", postbackText: "signup_individual" },
+            { title: "Organization", postbackText: "signup_organization" },
+            { title: "Back to Login", postbackText: "login" }
+          ],
+          "Please select your type:",
+          "Logistos Bot",
+          "Choose type"
+        );
+        return res.sendStatus(200);
+      }
+
+      if (msg_lower === "login") {
+        session.state = "awaiting_email";
+        await session.save();
+        await sendMessage(phone, "Please enter your *email* to login.");
+        return res.sendStatus(200);
+      }
+
+      await sendMessage(phone, "⚠️ Please choose *Login* or *Signup*.");
+      return res.sendStatus(200);
     }
 
     if (session.state === "awaiting_email") {
@@ -320,7 +332,7 @@ app.post("/webhook", async (req, res) => {
           "Select",
           "Open menu"
         );
-      } catch (err) {
+      } catch {
         session.state = "awaiting_email";
         await session.save();
         await sendMessage(phone, "❌ Login failed. Enter email again.");
@@ -328,12 +340,14 @@ app.post("/webhook", async (req, res) => {
       return res.sendStatus(200);
     }
 
+    // Authenticated menu + flows
     if (session.state === "authenticated") {
       const referenceTs = session.updatedAt || session.createdAt || new Date();
       const sessionAgeHours = dayjs().diff(dayjs(referenceTs), "hour");
 
       if (sessionAgeHours >= 48) {
-        await resetSession(phone);
+        await Session.deleteOne({ phone });
+        await BookShipment.deleteMany({ phone });
         await sendMessage(phone, "⚠️ Session expired. Type 'hi' to login again.");
         return res.sendStatus(200);
       }
@@ -349,7 +363,8 @@ app.post("/webhook", async (req, res) => {
       }
 
       if (msg_lower === "logout") {
-        await resetSession(phone);
+        await Session.deleteOne({ phone });
+        await BookShipment.deleteMany({ phone });
         await sendMessage(phone, "✅ Logged out. Type 'hi' to login.");
         return res.sendStatus(200);
       }
