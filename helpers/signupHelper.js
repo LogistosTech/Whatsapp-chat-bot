@@ -359,7 +359,7 @@ export async function handleSignupStep(phone, session, msg, interactiveType, raw
 
             // Optional: quick sanity check before calling API
             // (don't block submit — backend will validate, but this helps surface missing fields quickly)
-            // console.log("Signup payload being submitted:", payload);
+            console.log("Signup payload being submitted:", payload);
 
             const apiRes = await signupAPI(payload);
 
