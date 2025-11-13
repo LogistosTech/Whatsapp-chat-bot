@@ -329,15 +329,43 @@ export async function handleSignupStep(phone, session, msg, interactiveType, raw
             session.state = "signup.submitting";
             await session.save();
 
+            // --- Build an explicit payload to avoid missing required fields on the backend ---
+            // Ensure client_name and authorised_signatory_name are present
+            const sdata = session.signup.data || {};
+            const sfiles = session.signup.files || {};
+
+            // If we only have first/last name but not client_name, create one
+            const client_name_fallback = sdata.client_name
+                || (sdata.user_first_name && sdata.user_last_name && `${sdata.user_first_name} ${sdata.user_last_name}`)
+                || (sdata.user_first_name) || "";
+
+            const authorised_signatory_name_fallback =
+                sdata.authorised_signatory_name || client_name_fallback;
+
             const payload = {
-                ...session.signup.data,
-                ...session.signup.files,
+                client_name: client_name_fallback,
+                authorised_signatory_name: authorised_signatory_name_fallback,
+                user_first_name: sdata.user_first_name || "",
+                user_last_name: sdata.user_last_name || "",
+                user_email: sdata.user_email || sdata.email || "",
+                client_contact_number: sdata.client_contact_number || sdata.phone || "",
+                pan_no: sdata.pan_no || "",
+                gst_no: sdata.gst_no || "",
+                created_by: sdata.created_by || "1",
+                // file URLs (may be null if user skipped)
+                pan_card_copy_url: sfiles.pan_card_copy_url ?? null,
+                gst_registration_certificate_url: sfiles.gst_registration_certificate_url ?? null,
             };
+
+            // Optional: quick sanity check before calling API
+            // (don't block submit — backend will validate, but this helps surface missing fields quickly)
+            // console.log("Signup payload being submitted:", payload);
 
             const apiRes = await signupAPI(payload);
 
-            // Reset to login like web UI escalation popup does after success  :contentReference[oaicite:1]{index=1}
+            // Success — reset user back to login
             session.state = "awaiting_email";
+            delete session.signup;
             await session.save();
 
             await sendMessage(
@@ -347,8 +375,29 @@ export async function handleSignupStep(phone, session, msg, interactiveType, raw
         } catch (e) {
             session.state = "signup.confirm";
             await session.save();
-            // Mirror web: show duplication hint  :contentReference[oaicite:2]{index=2}
-            await sendMessage(phone, "❌ Signup failed. Email or Client Name may already exist. Try different details.");
+
+            // Show real error details to the user (and log)
+            const apiErr = e?.response?.data || e?.message || e;
+            console.error("❌ signupAPI error:", apiErr);
+
+            // If API returned a JSON object with field errors, pretty-print it
+            let errText = "";
+            try {
+                if (typeof apiErr === "object") {
+                    errText = JSON.stringify(apiErr, null, 2);
+                } else {
+                    errText = String(apiErr);
+                }
+            } catch {
+                errText = String(apiErr);
+            }
+
+            // Send the real error back to user (trim if too long)
+            const short = errText.length > 900 ? errText.slice(0, 900) + "...(truncated)" : errText;
+            await sendMessage(phone, `❌ Signup failed: ${short}`);
+
+            // Helpful tip message so the user knows what to try
+            await sendMessage(phone, "If the error mentions missing fields, please re-check your inputs or restart signup by typing *signup*.");
         }
         return;
     }
