@@ -12,6 +12,37 @@ const isGST = (s = "") => /^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]
 /**
  * Bootstraps the signup flow
  */
+
+// --- helper: extract media url and postback consistently ---
+function extractMediaAndPostback(rawPayload, msg) {
+    const raw = rawPayload || {};
+    const obj = (typeof raw === "string") ? (() => { try { return JSON.parse(raw); } catch { return rawPayload; } })() : raw;
+
+    // common shapes
+    const mediaUrl =
+        obj?.payload?.url ||
+        obj?.message?.payload?.url ||
+        obj?.payload?.media?.url ||
+        obj?.originalMessage?.payload?.url ||
+        obj?.attachments?.[0]?.payload?.url ||
+        obj?.url ||
+        null;
+
+    // postback quick replies / button payloads (varies by adapter)
+    const postback =
+        obj?.payload?.postback ||
+        obj?.postback ||
+        obj?.message?.postback ||
+        obj?.payload?.text || // some adapters put postback under payload.text
+        null;
+
+    // Also return textual message (if any)
+    const text = (typeof msg === "string" && msg.trim()) ? msg.trim() : (obj?.payload?.text || obj?.message?.text || "");
+
+    return { mediaUrl, postback, text, raw: obj };
+}
+
+
 export async function startSignupFlow(phone, session) {
     session.state = "signup.chooseType";
     session.signup = { user_type: "", data: {}, files: {} };
@@ -144,7 +175,16 @@ export async function handleSignupStep(phone, session, msg, interactiveType, raw
         if (session.signup.user_type === "organization") {
             await sendMessage(phone, "Enter *GST Number* (e.g., 22ABCDE1234F1Z5).");
         } else {
-            await sendMessage(phone, "Please *upload PAN card file* now (PDF/JPG/PNG).");
+            await sendQuickReplies(
+                phone,
+                [
+                    { title: "Upload PAN", postbackText: "upload_pan" },
+                    { title: "Skip", postbackText: "skip_pan" }
+                ],
+                "Please *upload PAN card file* now (PDF/JPG/PNG).\nYou can also *Skip* and complete signup without the file.",
+                "Upload PAN",
+                "Optional"
+            );
         }
         return;
     }
@@ -159,43 +199,116 @@ export async function handleSignupStep(phone, session, msg, interactiveType, raw
         session.signup.data.gst_no = gst;
         session.state = "signup.upload.panFile";
         await session.save();
-        await sendMessage(phone, "Please *upload PAN card file* now (PDF/JPG/PNG).");
+        await sendQuickReplies(
+            phone,
+            [
+                { title: "Upload PAN", postbackText: "upload_pan" },
+                { title: "Skip", postbackText: "skip_pan" }
+            ],
+            "Please *upload PAN card file* now (PDF/JPG/PNG).\nYou can also *Skip* and complete signup without the file.",
+            "Upload PAN",
+            "Optional"
+        );
         return;
     }
 
     // ---- PAN file upload ----
     if (session.state === "signup.upload.panFile") {
-        // Expect a media message; for Gupshup, rawPayload.payload.url (varies by type)
-        const mediaUrl = rawPayload?.payload?.url || rawPayload?.payload?.media?.url || rawPayload?.url;
-        if (!mediaUrl) {
-            await sendMessage(phone, "Please upload a *file* for PAN (PDF/JPG/PNG).");
+        const { mediaUrl, postback, text } = extractMediaAndPostback(rawPayload, msg);
+
+        // If user chose skip via quick reply or typed 'skip'
+        if ([postback, text?.toLowerCase()].some(v => v === "skip_pan" || v === "skip")) {
+            session.signup.files.pan_card_copy_url = null; // explicit: user skipped
+            session.state = session.signup.user_type === "organization" ? "signup.upload.gstFile" : "signup.confirm";
+            await session.save();
+
+            if (session.signup.user_type === "organization") {
+                await sendQuickReplies(
+                    phone,
+                    [
+                        { title: "Upload GST", postbackText: "upload_gst" },
+                        { title: "Skip", postbackText: "skip_gst" }
+                    ],
+                    "You chose to skip PAN upload. Now, please upload *GST Registration Certificate* or Skip.",
+                    "Upload GST",
+                    "Optional"
+                );
+            } else {
+                await sendMessage(phone, "You chose to skip PAN upload. Almost done. Type *confirm* to submit or *cancel* to discard.");
+            }
             return;
         }
-        session.signup.files.pan_card_copy_url = mediaUrl;
-        session.state = session.signup.user_type === "organization" ? "signup.upload.gstFile" : "signup.confirm";
-        await session.save();
 
-        if (session.signup.user_type === "organization") {
-            await sendMessage(phone, "Now upload *GST Registration Certificate* (PDF/JPG/PNG).");
-        } else {
-            await sendMessage(phone, "Almost done. Type *confirm* to submit or *cancel* to discard.");
+        // If a media URL is present, accept it and continue
+        if (mediaUrl) {
+            session.signup.files.pan_card_copy_url = mediaUrl;
+            session.state = session.signup.user_type === "organization" ? "signup.upload.gstFile" : "signup.confirm";
+            await session.save();
+
+            if (session.signup.user_type === "organization") {
+                await sendQuickReplies(
+                    phone,
+                    [
+                        { title: "Upload GST", postbackText: "upload_gst" },
+                        { title: "Skip", postbackText: "skip_gst" }
+                    ],
+                    "Now upload *GST Registration Certificate* (PDF/JPG/PNG) or choose Skip to continue without it.",
+                    "Upload GST",
+                    "Optional"
+                );
+            } else {
+                await sendMessage(phone, "PAN received. Almost done. Type *confirm* to submit or *cancel* to discard.");
+            }
+            return;
         }
+
+        // No media & no skip — re-prompt but show skip option so the user isn't trapped
+        await sendQuickReplies(
+            phone,
+            [
+                { title: "Upload PAN", postbackText: "upload_pan" },
+                { title: "Skip", postbackText: "skip_pan" }
+            ],
+            "Please upload a *file* for PAN (PDF/JPG/PNG) — or press *Skip* to continue without uploading.",
+            "Upload PAN",
+            "Optional"
+        );
         return;
     }
 
     // ---- GST file upload (org only) ----
     if (session.state === "signup.upload.gstFile") {
-        const mediaUrl = rawPayload?.payload?.url || rawPayload?.payload?.media?.url || rawPayload?.url;
-        if (!mediaUrl) {
-            await sendMessage(phone, "Please upload the *GST Registration Certificate* (PDF/JPG/PNG).");
+        const { mediaUrl, postback, text } = extractMediaAndPostback(rawPayload, msg);
+
+        if ([postback, text?.toLowerCase()].some(v => v === "skip_gst" || v === "skip")) {
+            session.signup.files.gst_registration_certificate_url = null;
+            session.state = "signup.confirm";
+            await session.save();
+            await sendMessage(phone, "You chose to skip GST upload. Type *confirm* to submit or *cancel* to discard.");
             return;
         }
-        session.signup.files.gst_registration_certificate_url = mediaUrl;
-        session.state = "signup.confirm";
-        await session.save();
-        await sendMessage(phone, "Great! Type *confirm* to submit or *cancel* to discard.");
+
+        if (mediaUrl) {
+            session.signup.files.gst_registration_certificate_url = mediaUrl;
+            session.state = "signup.confirm";
+            await session.save();
+            await sendMessage(phone, "Great! Type *confirm* to submit or *cancel* to discard.");
+            return;
+        }
+
+        await sendQuickReplies(
+            phone,
+            [
+                { title: "Upload GST", postbackText: "upload_gst" },
+                { title: "Skip", postbackText: "skip_gst" }
+            ],
+            "Please upload the *GST Registration Certificate* (PDF/JPG/PNG) — or press *Skip* to continue without uploading.",
+            "Upload GST",
+            "Optional"
+        );
         return;
     }
+
 
     // ---- confirm / cancel ----
     if (session.state === "signup.confirm") {
