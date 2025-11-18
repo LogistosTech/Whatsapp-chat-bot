@@ -193,11 +193,11 @@ app.post("/webhook", async (req, res) => {
       await startSignupFlow(phone, session);
       return res.sendStatus(200);
     }
+    
+    // any step in signup flow
     if (session.state && session.state.startsWith("signup.")) {
-      // raw body for media urls in Gupshup
-      const raw = req.body?.payload ? req.body.payload : req.body;
-      const body = typeof raw === "string" ? JSON.parse(raw) : raw || {};
-      await handleSignupStep(phone, session, msg, interactiveType, body);
+      const raw = (typeof req.body?.payload !== "undefined") ? req.body.payload : req.body;
+      await handleSignupStep(phone, session, msg, interactiveType, raw);
       return res.sendStatus(200);
     }
 

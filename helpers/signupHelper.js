@@ -3,7 +3,12 @@ import sendMessage from "../functions/sendMessage.js";
 import sendQuickReplies from "../functions/sendQuickReplies.js";
 import { signupAPI } from "../APIS/signupAPI.js";
 
-// ---------- validators (mirroring web) ----------
+// In-memory store for signup data, keyed by phone.
+// This avoids issues with Mongo schema not persisting nested objects.
+const signupStore = new Map();
+
+/* ---------------------- Validators (from web form) ---------------------- */
+
 const isEmail = (s = "") =>
     /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(s).trim());
 
@@ -18,13 +23,15 @@ const isGST = (s = "") =>
         String(s).trim()
     );
 
-// ---------- start flow ----------
+/* ----------------------------- Start flow ----------------------------- */
+
 export async function startSignupFlow(phone, session) {
-    session.state = "signup.chooseType";
-    session.signup = {
+    signupStore.set(phone, {
         user_type: "",
         data: {},
-    };
+    });
+
+    session.state = "signup.chooseType";
     await session.save();
 
     await sendQuickReplies(
@@ -40,7 +47,8 @@ export async function startSignupFlow(phone, session) {
     );
 }
 
-// ---------- central handler ----------
+/* ---------------------------- Main handler ---------------------------- */
+
 export async function handleSignupStep(
     phone,
     session,
@@ -51,50 +59,70 @@ export async function handleSignupStep(
     const text = (msg || "").trim();
     const lower = text.toLowerCase();
 
-    // If signup object is missing or state not in signup.*, tell user to restart
-    if (!session.signup || !session.state || !session.state.startsWith("signup.")) {
-        await sendMessage(
-            phone,
-            "It looks like your signup session expired. Please type *signup* to start again."
-        );
-        session.state = "awaiting_login_or_signup";
-        delete session.signup;
-        await session.save();
-        return;
-    }
-
-    // Quick escape back to login
+    // quick escape back to login
     if (["login", "back_login", "back"].includes(lower)) {
+        signupStore.delete(phone);
         session.state = "awaiting_email";
-        delete session.signup;
         await session.save();
         await sendMessage(phone, "Redirecting to login. Please enter your *email*.");
         return;
     }
 
-    const signup = session.signup;
-    const data = signup.data || (signup.data = {});
+    // must be in a signup state
+    if (!session.state || !session.state.startsWith("signup.")) {
+        await sendMessage(
+            phone,
+            "It looks like your signup session expired. Please type *signup* to start again."
+        );
+        signupStore.delete(phone);
+        session.state = "awaiting_login_or_signup";
+        await session.save();
+        return;
+    }
 
-    // ---------- STEP: choose type ----------
+    // get in-memory signup data
+    let signup = signupStore.get(phone);
+    if (!signup) {
+        // nothing stored – treat as expired
+        await sendMessage(
+            phone,
+            "It looks like your signup session expired. Please type *signup* to start again."
+        );
+        signupStore.delete(phone);
+        session.state = "awaiting_login_or_signup";
+        await session.save();
+        return;
+    }
+
+    const data = signup.data;
+
+    /* -------------------------- Choose type step -------------------------- */
+
     if (session.state === "signup.chooseType") {
         if (["type_org", "organization", "org", "1"].includes(lower)) {
             signup.user_type = "organization";
+            signupStore.set(phone, signup);
             session.state = "signup.org.client_name";
             await session.save();
+
             await sendMessage(
                 phone,
-                "You selected *Organization*.\n\nPlease enter your *Client Name* (Business / Company Name):"
+                "You selected *Organization*.\n\n" +
+                "Please enter your *Client Name* (Business / Company Name):"
             );
             return;
         }
 
         if (["type_ind", "individual", "ind", "2"].includes(lower)) {
             signup.user_type = "individual";
+            signupStore.set(phone, signup);
             session.state = "signup.ind.client_name";
             await session.save();
+
             await sendMessage(
                 phone,
-                "You selected *Individual*.\n\nPlease enter your *Full Name*:"
+                "You selected *Individual*.\n\n" +
+                "Please enter your *Full Name*:"
             );
             return;
         }
@@ -106,9 +134,8 @@ export async function handleSignupStep(
         return;
     }
 
-    // ========================================================================
-    //                           ORGANIZATION FLOW
-    // ========================================================================
+    /* ============================= ORG FLOW ============================== */
+
     if (signup.user_type === "organization") {
         // Client Name
         if (session.state === "signup.org.client_name") {
@@ -120,11 +147,13 @@ export async function handleSignupStep(
                 return;
             }
             data.client_name = text;
-            // requirement: authorised_signatory_name = client_name
+            // per requirement: signatory = client_name
             data.authorised_signatory_name = text;
 
+            signupStore.set(phone, signup);
             session.state = "signup.org.first_name";
             await session.save();
+
             await sendMessage(
                 phone,
                 "Please enter *First Name* of the primary user:"
@@ -143,8 +172,10 @@ export async function handleSignupStep(
             }
             data.user_first_name = text;
 
+            signupStore.set(phone, signup);
             session.state = "signup.org.last_name";
             await session.save();
+
             await sendMessage(phone, "Please enter *Last Name*:");
             return;
         }
@@ -160,8 +191,10 @@ export async function handleSignupStep(
             }
             data.user_last_name = text;
 
+            signupStore.set(phone, signup);
             session.state = "signup.org.email";
             await session.save();
+
             await sendMessage(phone, "Please enter your *Email*:");
             return;
         }
@@ -171,14 +204,17 @@ export async function handleSignupStep(
             if (!isEmail(text)) {
                 await sendMessage(
                     phone,
-                    "That doesn't look like a valid email.\nPlease enter a *valid Email* (example: name@example.com):"
+                    "That doesn't look like a valid email.\n" +
+                    "Please enter a *valid Email* (example: name@example.com):"
                 );
                 return;
             }
             data.user_email = text;
 
+            signupStore.set(phone, signup);
             session.state = "signup.org.phone";
             await session.save();
+
             await sendMessage(
                 phone,
                 "Please enter your *10-digit Phone Number* (digits only):"
@@ -198,8 +234,10 @@ export async function handleSignupStep(
             }
             data.client_contact_number = digits;
 
+            signupStore.set(phone, signup);
             session.state = "signup.org.pan";
             await session.save();
+
             await sendMessage(
                 phone,
                 "Please enter your *PAN Number* (e.g., ABCDE1234F):"
@@ -213,14 +251,18 @@ export async function handleSignupStep(
             if (!isPAN(pan)) {
                 await sendMessage(
                     phone,
-                    "Invalid PAN format.\nPAN should be 5 letters, 4 digits, 1 letter (e.g., ABCDE1234F).\n\nPlease enter your *PAN Number* again:"
+                    "Invalid PAN format.\n" +
+                    "PAN should be 5 letters, 4 digits, 1 letter (e.g., ABCDE1234F).\n\n" +
+                    "Please enter your *PAN Number* again:"
                 );
                 return;
             }
             data.pan_no = pan;
 
+            signupStore.set(phone, signup);
             session.state = "signup.org.gst";
             await session.save();
+
             await sendMessage(
                 phone,
                 "Please enter your *GST Number* (e.g., 22ABCDE1234F1Z5):"
@@ -228,29 +270,30 @@ export async function handleSignupStep(
             return;
         }
 
-        // GST (required for organization)
+        // GST (required for org)
         if (session.state === "signup.org.gst") {
             const gst = text.toUpperCase().replace(/\s/g, "");
             if (!isGST(gst)) {
                 await sendMessage(
                     phone,
-                    "Invalid GST format.\nExample: 22ABCDE1234F1Z5.\n\nPlease enter your *GST Number* again:"
+                    "Invalid GST format.\nExample: 22ABCDE1234F1Z5.\n\n" +
+                    "Please enter your *GST Number* again:"
                 );
                 return;
             }
             data.gst_no = gst;
 
-            // Move to review
+            signupStore.set(phone, signup);
             session.state = "signup.review";
             await session.save();
-            await sendReviewMessage(phone, session);
+
+            await sendReviewMessage(phone, signup);
             return;
         }
     }
 
-    // ========================================================================
-    //                           INDIVIDUAL FLOW
-    // ========================================================================
+    /* ========================== INDIVIDUAL FLOW ========================= */
+
     if (signup.user_type === "individual") {
         // Client Name / Full Name
         if (session.state === "signup.ind.client_name") {
@@ -267,13 +310,14 @@ export async function handleSignupStep(
             const first = parts.join(" ") || fullName;
 
             data.client_name = fullName;
-            // requirement: signatory = client_name
-            data.authorised_signatory_name = fullName;
+            data.authorised_signatory_name = fullName; // requirement
             data.user_first_name = first;
             data.user_last_name = last || "";
 
+            signupStore.set(phone, signup);
             session.state = "signup.ind.email";
             await session.save();
+
             await sendMessage(phone, "Please enter your *Email*:");
             return;
         }
@@ -283,14 +327,17 @@ export async function handleSignupStep(
             if (!isEmail(text)) {
                 await sendMessage(
                     phone,
-                    "That doesn't look like a valid email.\nPlease enter a *valid Email* (example: name@example.com):"
+                    "That doesn't look like a valid email.\n" +
+                    "Please enter a *valid Email* (example: name@example.com):"
                 );
                 return;
             }
             data.user_email = text;
 
+            signupStore.set(phone, signup);
             session.state = "signup.ind.phone";
             await session.save();
+
             await sendMessage(
                 phone,
                 "Please enter your *10-digit Phone Number* (digits only):"
@@ -310,8 +357,10 @@ export async function handleSignupStep(
             }
             data.client_contact_number = digits;
 
+            signupStore.set(phone, signup);
             session.state = "signup.ind.pan";
             await session.save();
+
             await sendMessage(
                 phone,
                 "Please enter your *PAN Number* (e.g., ABCDE1234F):"
@@ -325,21 +374,26 @@ export async function handleSignupStep(
             if (!isPAN(pan)) {
                 await sendMessage(
                     phone,
-                    "Invalid PAN format.\nPAN should be 5 letters, 4 digits, 1 letter (e.g., ABCDE1234F).\n\nPlease enter your *PAN Number* again:"
+                    "Invalid PAN format.\n" +
+                    "PAN should be 5 letters, 4 digits, 1 letter (e.g., ABCDE1234F).\n\n" +
+                    "Please enter your *PAN Number* again:"
                 );
                 return;
             }
             data.pan_no = pan;
 
+            signupStore.set(phone, signup);
             session.state = "signup.ind.gst";
             await session.save();
+
             await sendQuickReplies(
                 phone,
                 [
                     { title: "Enter GST", postbackText: "enter_gst" },
                     { title: "Skip", postbackText: "skip_gst" },
                 ],
-                "If you have a *GST Number*, please enter it now.\nOtherwise, you can *Skip*.",
+                "If you have a *GST Number*, please enter it now.\n" +
+                "Otherwise, you can *Skip*.",
                 "GST Number",
                 "Optional"
             );
@@ -355,7 +409,8 @@ export async function handleSignupStep(
                 if (!isGST(gst)) {
                     await sendMessage(
                         phone,
-                        "Invalid GST format.\nExample: 22ABCDE1234F1Z5.\n\nPlease enter your *GST Number* again or type *skip*:"
+                        "Invalid GST format.\nExample: 22ABCDE1234F1Z5.\n\n" +
+                        "Please enter your *GST Number* again or type *skip*:"
                     );
                     return;
                 }
@@ -364,28 +419,30 @@ export async function handleSignupStep(
                 data.gst_no = "";
             }
 
+            signupStore.set(phone, signup);
             session.state = "signup.review";
             await session.save();
-            await sendReviewMessage(phone, session);
+
+            await sendReviewMessage(phone, signup);
             return;
         }
     }
 
-    // ========================================================================
-    //                                REVIEW
-    // ========================================================================
+    /* ================================ REVIEW ============================== */
+
     if (session.state === "signup.review") {
-        // Accept numbers or words for options
         if (["1", "confirm", "submit", "confirm & submit"].includes(lower)) {
-            await performSubmit(phone, session);
+            await performSubmit(phone, session, signup);
             return;
         }
 
         if (["2", "restart", "start over"].includes(lower)) {
-            // start fresh
+            signupStore.delete(phone);
+            signupStore.set(phone, { user_type: "", data: {} });
+
             session.state = "signup.chooseType";
-            session.signup = { user_type: "", data: {} };
             await session.save();
+
             await sendQuickReplies(
                 phone,
                 [
@@ -400,9 +457,10 @@ export async function handleSignupStep(
         }
 
         if (["3", "cancel"].includes(lower)) {
+            signupStore.delete(phone);
             session.state = "awaiting_login_or_signup";
-            delete session.signup;
             await session.save();
+
             await sendMessage(
                 phone,
                 "Signup cancelled. You can type *signup* anytime to start again."
@@ -410,7 +468,6 @@ export async function handleSignupStep(
             return;
         }
 
-        // If something else, just re-show review message
         await sendMessage(
             phone,
             "Please reply with:\n*1* – Confirm & Submit\n*2* – Start Over\n*3* – Cancel"
@@ -418,19 +475,20 @@ export async function handleSignupStep(
         return;
     }
 
-    // Fallback: unknown step inside signup flow
+    // fallback
     await sendMessage(
         phone,
         "Something went wrong with the signup flow. Please type *signup* to start again."
     );
+    signupStore.delete(phone);
     session.state = "awaiting_login_or_signup";
-    delete session.signup;
     await session.save();
 }
 
-// ---------- helper: send review summary ----------
-async function sendReviewMessage(phone, session) {
-    const { user_type, data } = session.signup;
+/* ------------------------ Review message helper ------------------------ */
+
+async function sendReviewMessage(phone, signup) {
+    const { user_type, data } = signup;
     const isOrg = user_type === "organization";
 
     const lines = [
@@ -455,18 +513,20 @@ async function sendReviewMessage(phone, session) {
     await sendMessage(phone, lines.join("\n"));
 }
 
-// ---------- helper: perform submit ----------
-async function performSubmit(phone, session) {
-    const { user_type, data } = session.signup;
+/* ------------------------ Submit to backend API ------------------------ */
 
-    // Basic local check (similar to web validate) :contentReference[oaicite:1]{index=1}
+async function performSubmit(phone, session, signup) {
+    const { user_type, data } = signup;
+
+    // Local required checks (mirroring web)
     if (!data.client_name || !data.user_email || !data.client_contact_number || !data.pan_no) {
         await sendMessage(
             phone,
-            "Some required fields are missing.\nPlease type *signup* to start again and fill all details."
+            "Some required fields are missing.\n" +
+            "Please type *signup* to start again and fill all details."
         );
+        signupStore.delete(phone);
         session.state = "awaiting_login_or_signup";
-        delete session.signup;
         await session.save();
         return;
     }
@@ -476,8 +536,8 @@ async function performSubmit(phone, session) {
             phone,
             "GST Number is required for organizations. Please type *signup* to start again."
         );
+        signupStore.delete(phone);
         session.state = "awaiting_login_or_signup";
-        delete session.signup;
         await session.save();
         return;
     }
@@ -497,22 +557,21 @@ async function performSubmit(phone, session) {
             pan_no: data.pan_no,
             gst_no: data.gst_no || "",
             created_by: "1",
-            user_type: user_type, // match web code :contentReference[oaicite:2]{index=2}
+            user_type: user_type,
         };
 
         console.log("Signup payload being submitted:", payload);
 
         const apiRes = await signupAPI(payload);
 
-        // Back to login state
+        signupStore.delete(phone);
         session.state = "awaiting_email";
-        delete session.signup;
         await session.save();
 
         await sendMessage(
             phone,
-            "✅ *Signup successful!*\n\nYour onboarding is in process. " +
-            "Please check your email for verification.\n\n" +
+            "✅ *Signup successful!*\n\n" +
+            "Your onboarding is in process. Please check your email.\n\n" +
             "Now, please login with your email and password."
         );
     } catch (e) {
@@ -539,7 +598,8 @@ async function performSubmit(phone, session) {
             "Please review the message and try again, or type *signup* to start over."
         );
 
-        session.state = "signup.review"; // let user decide again
+        // Stay in review so user can decide what to do
+        session.state = "signup.review";
         await session.save();
     }
 }
