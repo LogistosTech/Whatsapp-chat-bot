@@ -42,25 +42,24 @@ const TYPE_TO_SUBTYPES = {
     general_complaints: ["lost_shipments", "damaged_shipments", "general_other_complaints"],
 };
 
-const SKIP = "skip"; // allowed only for AWB (and note can be blank)
+const SKIP = "skip";
 
-/** Start flow: choose TYPE (required) */
+/** Start flow: home screen (Create / Status) */
 export const startTicketFlow = async (phone, session) => {
     session.operation = "ticketing";
-    session.ticketStatus = "choose_type";
+    session.ticketStatus = "ticket_home";
     session.ticketDraft = {};
     await session.save();
-
-    const typeOptions = Object.keys(TYPES).map(key => ({
-        title: TYPES[key],
-        postbackText: key,
-    }));
 
     await sendListMessage(
         phone,
         "Logistos Bot",
-        "Choose a category:",
-        typeOptions,
+        "What would you like to do?",
+        [
+            { title: "Create Ticket", postbackText: "ticket_create" },
+            { title: "Check Ticket Status", postbackText: "ticket_status" },
+            { title: "Back", postbackText: "back" },
+        ],
         "",
         "Open options"
     );
@@ -85,25 +84,23 @@ const setDraft = async (session, patch) => {
     await session.save();
 };
 
-// 🔹 format ticket details for WhatsApp
 const formatTicketDetails = (details, requestedIds) => {
     let list = [];
 
-    // normalize into array
     let items = [];
-    if (Array.isArray(details)) {
-        items = details;
-    } else if (Array.isArray(details?.results)) {
-        items = details.results;
-    } else if (Array.isArray(details?.data)) {
-        items = details.data;
-    } else {
-        // unknown shape, fallback
-        return "Raw response:\n```" + JSON.stringify(details, null, 2).slice(0, 900) + "```";
+    if (Array.isArray(details)) items = details;
+    else if (Array.isArray(details?.results)) items = details.results;
+    else if (Array.isArray(details?.data)) items = details.data;
+    else {
+        return (
+            "Raw response:\n```" +
+            JSON.stringify(details, null, 2).slice(0, 900) +
+            "```"
+        );
     }
 
-    requestedIds.forEach(id => {
-        const t = items.find(x => Number(x.id) === Number(id));
+    requestedIds.forEach((id) => {
+        const t = items.find((x) => Number(x.id) === Number(id));
         if (!t) {
             list.push(`*Ticket ${id}:* Not found or not accessible.`);
             return;
@@ -132,7 +129,7 @@ const ticketCreateHelper = async (phone, msg = "") => {
     const text = String(msg || "").trim();
     const lower = text.toLowerCase();
 
-    // basic commands
+    // global commands
     if (lower === "logout") {
         await sendMessage(phone, "You have been logged out. Type *hi* to log in again.");
         await Session.deleteOne({ phone });
@@ -147,8 +144,8 @@ const ticketCreateHelper = async (phone, msg = "") => {
         return startTicketFlow(phone, session);
     }
 
-    // 🔹 allow starting status flow from anywhere:
-    if (["ticket_status", "status", "ticket status"].includes(lower)) {
+    // allow starting status flow from anywhere
+    if (["ticket_status", "status", "ticket status", "track ticket"].includes(lower)) {
         session.operation = "ticketing";
         session.ticketStatus = "status_ask_ids";
         session.ticketDraft = {};
@@ -161,15 +158,83 @@ const ticketCreateHelper = async (phone, msg = "") => {
         return;
     }
 
-    let st = session.ticketStatus || "choose_type";
+    let st = session.ticketStatus || "ticket_home";
 
     switch (st) {
+        /* ------------------ HOME: Create / Status ------------------ */
+        case "ticket_home": {
+            if (["ticket_create", "create", "new", "create ticket"].includes(lower)) {
+                // go to type selection
+                session.ticketStatus = "choose_type";
+                session.operation = "ticketing";
+                session.ticketDraft = {};
+                await session.save();
+
+                const typeOptions = Object.keys(TYPES).map((key) => ({
+                    title: TYPES[key],
+                    postbackText: key,
+                }));
+
+                await sendListMessage(
+                    phone,
+                    "Logistos Bot",
+                    "Choose a category:",
+                    typeOptions,
+                    "",
+                    "Open options"
+                );
+                return;
+            }
+
+            if (
+                ["ticket_status", "status", "ticket status", "track ticket"].includes(
+                    lower
+                )
+            ) {
+                session.ticketStatus = "status_ask_ids";
+                session.operation = "ticketing";
+                session.ticketDraft = {};
+                await session.save();
+
+                await sendMessage(
+                    phone,
+                    "Please send one or more *Ticket IDs* separated by commas.\n\nExample: `296, 9999999, 290`"
+                );
+                return;
+            }
+
+            if (["back"].includes(lower)) {
+                // go back to your main bot menu (state depends on your app)
+                session.operation = null;
+                session.ticketStatus = null;
+                session.ticketDraft = {};
+                await session.save();
+                await sendMessage(phone, "Okay, taking you back to the main menu.");
+                return;
+            }
+
+            // if user sent something else, re-show options
+            await sendListMessage(
+                phone,
+                "Logistos Bot",
+                "Please choose an option:",
+                [
+                    { title: "Create Ticket", postbackText: "ticket_create" },
+                    { title: "Check Ticket Status", postbackText: "ticket_status" },
+                    { title: "Back", postbackText: "back" },
+                ],
+                "",
+                "Open options"
+            );
+            return;
+        }
+
         /* ------------------- CREATE TICKET FLOW ------------------- */
 
         case "choose_type": {
             const validType = Object.keys(TYPES).includes(text);
             if (!validType) {
-                const options = Object.keys(TYPES).map(key => ({
+                const options = Object.keys(TYPES).map((key) => ({
                     title: TYPES[key],
                     postbackText: key,
                 }));
@@ -188,7 +253,7 @@ const ticketCreateHelper = async (phone, msg = "") => {
             await session.save();
 
             const keys = TYPE_TO_SUBTYPES[text] || [];
-            const opts = keys.map(k => ({
+            const opts = keys.map((k) => ({
                 title: SUBTYPES[k],
                 postbackText: k,
             }));
@@ -207,7 +272,7 @@ const ticketCreateHelper = async (phone, msg = "") => {
             const valid = Object.prototype.hasOwnProperty.call(SUBTYPES, text);
             if (!valid) {
                 const keys = TYPE_TO_SUBTYPES[session.ticketDraft?.type_key] || [];
-                const opts = keys.map(k => ({
+                const opts = keys.map((k) => ({
                     title: SUBTYPES[k],
                     postbackText: k,
                 }));
@@ -230,7 +295,7 @@ const ticketCreateHelper = async (phone, msg = "") => {
         case "need_shipment": {
             if (!text)
                 return sendMessage(phone, "Shipment # is required. Please enter it:");
-            await setDraft(session, { shipment_id: text }); // keep string
+            await setDraft(session, { shipment_id: text });
             session.ticketStatus = "need_awb";
             await session.save();
 
@@ -246,7 +311,7 @@ const ticketCreateHelper = async (phone, msg = "") => {
 
         case "need_awb": {
             if (lower !== SKIP) {
-                await setDraft(session, { awb: text }); // can be any string
+                await setDraft(session, { awb: text });
             } else {
                 await setDraft(session, { awb: undefined });
             }
@@ -301,7 +366,7 @@ const ticketCreateHelper = async (phone, msg = "") => {
                 subtype_key,
                 shipment_id: String(shipment_id),
                 ...(awb ? { awb: String(awb) } : {}),
-                details: { note }, // may be empty
+                details: { note },
             };
 
             console.log("🧾 Ticket payload:", payload);
@@ -309,7 +374,6 @@ const ticketCreateHelper = async (phone, msg = "") => {
             try {
                 const resp = await createTicketAPI(phone, payload);
 
-                // Reset flow
                 session.operation = null;
                 session.ticketStatus = "done";
                 session.ticketDraft = {};
@@ -323,10 +387,9 @@ const ticketCreateHelper = async (phone, msg = "") => {
                     "Logistos Bot",
                     "What next?",
                     [
-                        { title: "Book a Shipment", postbackText: "book" },
+                        { title: "Create Another Ticket", postbackText: "ticket_create" },
+                        { title: "Check Ticket Status", postbackText: "ticket_status" },
                         { title: "Track an Order", postbackText: "track" },
-                        { title: "Create Another Ticket", postbackText: "ticket" },
-                        { title: "Check Ticket Status", postbackText: "ticket_status" }, // 🔹 NEW
                         { title: "Logout", postbackText: "logout" },
                     ],
                     "",
@@ -350,11 +413,13 @@ const ticketCreateHelper = async (phone, msg = "") => {
         /* ------------------- TICKET STATUS FLOW ------------------- */
 
         case "status_ask_ids": {
-            // parse comma/space separated IDs
-            const parts = text.split(/[,\s]+/).map(x => x.trim()).filter(Boolean);
+            const parts = text
+                .split(/[,\s]+/)
+                .map((x) => x.trim())
+                .filter(Boolean);
             const ids = parts
-                .map(p => Number(p))
-                .filter(n => Number.isFinite(n) && n > 0);
+                .map((p) => Number(p))
+                .filter((n) => Number.isFinite(n) && n > 0);
 
             if (!ids.length) {
                 await sendMessage(
@@ -370,7 +435,6 @@ const ticketCreateHelper = async (phone, msg = "") => {
 
                 await sendMessage(phone, formatted);
 
-                // after showing status, go to small menu
                 session.ticketStatus = "status_done";
                 await session.save();
 
@@ -379,7 +443,7 @@ const ticketCreateHelper = async (phone, msg = "") => {
                     "Logistos Bot",
                     "Anything else?",
                     [
-                        { title: "Create a Ticket", postbackText: "ticket" },
+                        { title: "Create a Ticket", postbackText: "ticket_create" },
                         { title: "Check Another Ticket", postbackText: "ticket_status" },
                         { title: "Track an Order", postbackText: "track" },
                         { title: "Logout", postbackText: "logout" },
@@ -403,15 +467,18 @@ const ticketCreateHelper = async (phone, msg = "") => {
         }
 
         case "status_done": {
-            // user sends something after seeing status – re-route quickly
-            if (["ticket", "create", "new ticket"].includes(lower)) {
+            if (["ticket_create", "ticket", "create", "new ticket"].includes(lower)) {
                 session.ticketStatus = "choose_type";
                 session.operation = "ticketing";
                 session.ticketDraft = {};
                 await session.save();
                 return startTicketFlow(phone, session);
             }
-            if (["ticket_status", "status", "ticket status"].includes(lower)) {
+            if (
+                ["ticket_status", "status", "ticket status", "track ticket"].includes(
+                    lower
+                )
+            ) {
                 session.ticketStatus = "status_ask_ids";
                 session.operation = "ticketing";
                 await session.save();
@@ -421,13 +488,13 @@ const ticketCreateHelper = async (phone, msg = "") => {
                 );
                 return;
             }
-            // default: send the small menu again
+            // default: show small menu again
             await sendListMessage(
                 phone,
                 "Logistos Bot",
                 "Anything else?",
                 [
-                    { title: "Create a Ticket", postbackText: "ticket" },
+                    { title: "Create a Ticket", postbackText: "ticket_create" },
                     { title: "Check Another Ticket", postbackText: "ticket_status" },
                     { title: "Track an Order", postbackText: "track" },
                     { title: "Logout", postbackText: "logout" },
@@ -442,7 +509,8 @@ const ticketCreateHelper = async (phone, msg = "") => {
 
         case "done":
         default: {
-            session.ticketStatus = "choose_type";
+            // go back to ticket home
+            session.ticketStatus = "ticket_home";
             session.operation = "ticketing";
             session.ticketDraft = {};
             await session.save();
