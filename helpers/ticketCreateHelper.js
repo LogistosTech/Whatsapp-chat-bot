@@ -1,8 +1,10 @@
+// helpers/ticketCreateHelper.js
 import sendMessage from "../functions/sendMessage.js";
 import sendQuickReplies from "../functions/sendQuickReplies.js";
 import sendListMessage from "../functions/sendListMessage.js";
 import createTicketAPI from "../APIS/createTicketAPI.js";
 import getMyDetailsAPI from "../APIS/getMyDetailsAPI.js";
+import getTicketDetailsAPI from "../APIS/getTicketDetailsAPI.js";
 
 export const TYPES = {
     ndr_related: "NDR Related",
@@ -49,9 +51,11 @@ export const startTicketFlow = async (phone, session) => {
     session.ticketDraft = {};
     await session.save();
 
-    const typeOptions = Object.keys(TYPES).map(key => ({ title: TYPES[key], postbackText: key }));
+    const typeOptions = Object.keys(TYPES).map(key => ({
+        title: TYPES[key],
+        postbackText: key,
+    }));
 
-    // >3 items -> list
     await sendListMessage(
         phone,
         "Logistos Bot",
@@ -65,7 +69,11 @@ export const startTicketFlow = async (phone, session) => {
 const ensureClientId = async (phone, Session) => {
     let session = await Session.findOne({ phone });
     if (!session?.client_id) {
-        try { await getMyDetailsAPI(phone); } catch { }
+        try {
+            await getMyDetailsAPI(phone);
+        } catch {
+            /* ignore */
+        }
         session = await Session.findOne({ phone });
     }
     return session?.client_id ? Number(session.client_id) : null;
@@ -77,6 +85,45 @@ const setDraft = async (session, patch) => {
     await session.save();
 };
 
+// 🔹 format ticket details for WhatsApp
+const formatTicketDetails = (details, requestedIds) => {
+    let list = [];
+
+    // normalize into array
+    let items = [];
+    if (Array.isArray(details)) {
+        items = details;
+    } else if (Array.isArray(details?.results)) {
+        items = details.results;
+    } else if (Array.isArray(details?.data)) {
+        items = details.data;
+    } else {
+        // unknown shape, fallback
+        return "Raw response:\n```" + JSON.stringify(details, null, 2).slice(0, 900) + "```";
+    }
+
+    requestedIds.forEach(id => {
+        const t = items.find(x => Number(x.id) === Number(id));
+        if (!t) {
+            list.push(`*Ticket ${id}:* Not found or not accessible.`);
+            return;
+        }
+
+        const status = t.status || t.current_status || t.ticket_status || "Unknown";
+        const subType = t.subtype || t.subtype_key || "";
+        const created = t.created_at || t.created_on || "";
+
+        list.push(
+            `*Ticket ${t.id}*` +
+            `\n• Status: *${status}*` +
+            (subType ? `\n• Type: ${subType}` : "") +
+            (created ? `\n• Created: ${created}` : "")
+        );
+    });
+
+    return list.join("\n\n");
+};
+
 const ticketCreateHelper = async (phone, msg = "") => {
     const Session = (await import("../models/sessionModel.js")).default;
     let session = await Session.findOne({ phone });
@@ -85,11 +132,13 @@ const ticketCreateHelper = async (phone, msg = "") => {
     const text = String(msg || "").trim();
     const lower = text.toLowerCase();
 
+    // basic commands
     if (lower === "logout") {
         await sendMessage(phone, "You have been logged out. Type *hi* to log in again.");
         await Session.deleteOne({ phone });
         return;
     }
+
     if (lower === "restart") {
         session.operation = null;
         session.ticketStatus = null;
@@ -98,15 +147,40 @@ const ticketCreateHelper = async (phone, msg = "") => {
         return startTicketFlow(phone, session);
     }
 
+    // 🔹 allow starting status flow from anywhere:
+    if (["ticket_status", "status", "ticket status"].includes(lower)) {
+        session.operation = "ticketing";
+        session.ticketStatus = "status_ask_ids";
+        session.ticketDraft = {};
+        await session.save();
+
+        await sendMessage(
+            phone,
+            "Please send one or more *Ticket IDs* separated by commas.\n\nExample: `296, 9999999, 290`"
+        );
+        return;
+    }
+
     let st = session.ticketStatus || "choose_type";
 
     switch (st) {
+        /* ------------------- CREATE TICKET FLOW ------------------- */
+
         case "choose_type": {
             const validType = Object.keys(TYPES).includes(text);
             if (!validType) {
-                // re-prompt
-                const options = Object.keys(TYPES).map(key => ({ title: TYPES[key], postbackText: key }));
-                await sendListMessage(phone, "Logistos Bot", "Please pick a valid category:", options, "", "Open options");
+                const options = Object.keys(TYPES).map(key => ({
+                    title: TYPES[key],
+                    postbackText: key,
+                }));
+                await sendListMessage(
+                    phone,
+                    "Logistos Bot",
+                    "Please pick a valid category:",
+                    options,
+                    "",
+                    "Open options"
+                );
                 return;
             }
             await setDraft(session, { type_key: text });
@@ -114,7 +188,10 @@ const ticketCreateHelper = async (phone, msg = "") => {
             await session.save();
 
             const keys = TYPE_TO_SUBTYPES[text] || [];
-            const opts = keys.map(k => ({ title: SUBTYPES[k], postbackText: k }));
+            const opts = keys.map(k => ({
+                title: SUBTYPES[k],
+                postbackText: k,
+            }));
             await sendListMessage(
                 phone,
                 "Logistos Bot",
@@ -130,8 +207,18 @@ const ticketCreateHelper = async (phone, msg = "") => {
             const valid = Object.prototype.hasOwnProperty.call(SUBTYPES, text);
             if (!valid) {
                 const keys = TYPE_TO_SUBTYPES[session.ticketDraft?.type_key] || [];
-                const opts = keys.map(k => ({ title: SUBTYPES[k], postbackText: k }));
-                await sendListMessage(phone, "Logistos Bot", "Pick a subcategory:", opts, "", "Open options");
+                const opts = keys.map(k => ({
+                    title: SUBTYPES[k],
+                    postbackText: k,
+                }));
+                await sendListMessage(
+                    phone,
+                    "Logistos Bot",
+                    "Pick a subcategory:",
+                    opts,
+                    "",
+                    "Open options"
+                );
                 return;
             }
             await setDraft(session, { subtype_key: text });
@@ -141,12 +228,12 @@ const ticketCreateHelper = async (phone, msg = "") => {
         }
 
         case "need_shipment": {
-            if (!text) return sendMessage(phone, "Shipment # is required. Please enter it:");
+            if (!text)
+                return sendMessage(phone, "Shipment # is required. Please enter it:");
             await setDraft(session, { shipment_id: text }); // keep string
             session.ticketStatus = "need_awb";
             await session.save();
 
-            // AWB is optional -> allow Skip
             await sendQuickReplies(
                 phone,
                 [{ title: "Skip", postbackText: SKIP }],
@@ -169,25 +256,45 @@ const ticketCreateHelper = async (phone, msg = "") => {
         }
 
         case "need_details": {
-            // Note is optional
             const note = text || "";
             await setDraft(session, { note });
 
             const client_id = await ensureClientId(phone, Session);
             if (!client_id) {
-                await sendMessage(phone, "Your account isn’t linked yet. Please type *hi* and login again.");
+                await sendMessage(
+                    phone,
+                    "Your account isn’t linked yet. Please type *hi* and login again."
+                );
                 session.operation = null;
                 session.ticketStatus = null;
                 await session.save();
                 return;
             }
 
-            const { type_key, subtype_key, shipment_id, awb } = session.ticketDraft || {};
+            const { type_key, subtype_key, shipment_id, awb } =
+                session.ticketDraft || {};
 
-            // Hard validations (as requested): type, subtype, shipment_id are REQUIRED
-            if (!type_key) { await sendMessage(phone, "Category missing. Type *restart* to begin again."); return; }
-            if (!subtype_key) { await sendMessage(phone, "Subcategory missing. Type *restart* to begin again."); return; }
-            if (!shipment_id) { await sendMessage(phone, "Shipment # missing. Type *restart* to begin again."); return; }
+            if (!type_key) {
+                await sendMessage(
+                    phone,
+                    "Category missing. Type *restart* to begin again."
+                );
+                return;
+            }
+            if (!subtype_key) {
+                await sendMessage(
+                    phone,
+                    "Subcategory missing. Type *restart* to begin again."
+                );
+                return;
+            }
+            if (!shipment_id) {
+                await sendMessage(
+                    phone,
+                    "Shipment # missing. Type *restart* to begin again."
+                );
+                return;
+            }
 
             const payload = {
                 client_id,
@@ -209,7 +316,7 @@ const ticketCreateHelper = async (phone, msg = "") => {
                 await session.save();
 
                 const id = resp?.id ?? resp?.ticket_id ?? "N/A";
-                await sendMessage(phone, `Created.\nID: ${id}`);
+                await sendMessage(phone, `✅ Ticket created.\nID: *${id}*`);
 
                 await sendListMessage(
                     phone,
@@ -218,20 +325,120 @@ const ticketCreateHelper = async (phone, msg = "") => {
                     [
                         { title: "Book a Shipment", postbackText: "book" },
                         { title: "Track an Order", postbackText: "track" },
-                        { title: "Create Another", postbackText: "ticket" },
+                        { title: "Create Another Ticket", postbackText: "ticket" },
+                        { title: "Check Ticket Status", postbackText: "ticket_status" }, // 🔹 NEW
                         { title: "Logout", postbackText: "logout" },
                     ],
                     "",
                     "Open menu"
                 );
             } catch (err) {
-                console.error("❌ Ticket create error:", err?.response?.data || err?.message || err);
+                console.error(
+                    "❌ Ticket create error:",
+                    err?.response?.data || err?.message || err
+                );
                 session.ticketStatus = "need_details";
                 await session.save();
-                await sendMessage(phone, "Couldn’t create it now. Try again or type *restart*.");
+                await sendMessage(
+                    phone,
+                    "Couldn’t create it now. Try again or type *restart*."
+                );
             }
             return;
         }
+
+        /* ------------------- TICKET STATUS FLOW ------------------- */
+
+        case "status_ask_ids": {
+            // parse comma/space separated IDs
+            const parts = text.split(/[,\s]+/).map(x => x.trim()).filter(Boolean);
+            const ids = parts
+                .map(p => Number(p))
+                .filter(n => Number.isFinite(n) && n > 0);
+
+            if (!ids.length) {
+                await sendMessage(
+                    phone,
+                    "Please send one or more *numeric Ticket IDs* separated by commas.\n\nExample: `296, 9999999, 290`"
+                );
+                return;
+            }
+
+            try {
+                const details = await getTicketDetailsAPI(phone, ids);
+                const formatted = formatTicketDetails(details, ids);
+
+                await sendMessage(phone, formatted);
+
+                // after showing status, go to small menu
+                session.ticketStatus = "status_done";
+                await session.save();
+
+                await sendListMessage(
+                    phone,
+                    "Logistos Bot",
+                    "Anything else?",
+                    [
+                        { title: "Create a Ticket", postbackText: "ticket" },
+                        { title: "Check Another Ticket", postbackText: "ticket_status" },
+                        { title: "Track an Order", postbackText: "track" },
+                        { title: "Logout", postbackText: "logout" },
+                    ],
+                    "",
+                    "Open menu"
+                );
+            } catch (err) {
+                console.error(
+                    "❌ Ticket status error:",
+                    err?.response?.data || err?.message || err
+                );
+                await sendMessage(
+                    phone,
+                    "Couldn’t fetch ticket status right now. Please try again later or check from the web portal."
+                );
+                session.ticketStatus = "status_ask_ids";
+                await session.save();
+            }
+            return;
+        }
+
+        case "status_done": {
+            // user sends something after seeing status – re-route quickly
+            if (["ticket", "create", "new ticket"].includes(lower)) {
+                session.ticketStatus = "choose_type";
+                session.operation = "ticketing";
+                session.ticketDraft = {};
+                await session.save();
+                return startTicketFlow(phone, session);
+            }
+            if (["ticket_status", "status", "ticket status"].includes(lower)) {
+                session.ticketStatus = "status_ask_ids";
+                session.operation = "ticketing";
+                await session.save();
+                await sendMessage(
+                    phone,
+                    "Please send one or more *Ticket IDs* separated by commas.\n\nExample: `296, 9999999, 290`"
+                );
+                return;
+            }
+            // default: send the small menu again
+            await sendListMessage(
+                phone,
+                "Logistos Bot",
+                "Anything else?",
+                [
+                    { title: "Create a Ticket", postbackText: "ticket" },
+                    { title: "Check Another Ticket", postbackText: "ticket_status" },
+                    { title: "Track an Order", postbackText: "track" },
+                    { title: "Logout", postbackText: "logout" },
+                ],
+                "",
+                "Open menu"
+            );
+            return;
+        }
+
+        /* --------------------- FALLBACK / RESET -------------------- */
 
         case "done":
         default: {
