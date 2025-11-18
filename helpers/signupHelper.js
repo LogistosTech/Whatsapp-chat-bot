@@ -3,49 +3,28 @@ import sendMessage from "../functions/sendMessage.js";
 import sendQuickReplies from "../functions/sendQuickReplies.js";
 import { signupAPI } from "../APIS/signupAPI.js";
 
-// ---------- validators ----------
-const isEmail = (s = "") => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(s).trim());
-const isPhone10 = (s = "") => /^\d{10}$/.test(String(s).trim());
-const isPAN = (s = "") => /^[A-Z]{5}[0-9]{4}[A-Z]{1}$/.test(String(s).trim());
-const isGST = (s = "") => /^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$/.test(String(s).trim());
+// ---------- validators (mirroring web) ----------
+const isEmail = (s = "") =>
+    /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(s).trim());
 
-/**
- * Bootstraps the signup flow
- */
+const isPhone10 = (s = "") =>
+    /^\d{10}$/.test(String(s).trim());
 
-// --- helper: extract media url and postback consistently ---
-function extractMediaAndPostback(rawPayload, msg) {
-    const raw = rawPayload || {};
-    const obj = (typeof raw === "string") ? (() => { try { return JSON.parse(raw); } catch { return rawPayload; } })() : raw;
+const isPAN = (s = "") =>
+    /^[A-Z]{5}[0-9]{4}[A-Z]{1}$/.test(String(s).trim());
 
-    // common shapes
-    const mediaUrl =
-        obj?.payload?.url ||
-        obj?.message?.payload?.url ||
-        obj?.payload?.media?.url ||
-        obj?.originalMessage?.payload?.url ||
-        obj?.attachments?.[0]?.payload?.url ||
-        obj?.url ||
-        null;
+const isGST = (s = "") =>
+    /^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$/.test(
+        String(s).trim()
+    );
 
-    // postback quick replies / button payloads (varies by adapter)
-    const postback =
-        obj?.payload?.postback ||
-        obj?.postback ||
-        obj?.message?.postback ||
-        obj?.payload?.text || // some adapters put postback under payload.text
-        null;
-
-    // Also return textual message (if any)
-    const text = (typeof msg === "string" && msg.trim()) ? msg.trim() : (obj?.payload?.text || obj?.message?.text || "");
-
-    return { mediaUrl, postback, text, raw: obj };
-}
-
-
+// ---------- start flow ----------
 export async function startSignupFlow(phone, session) {
     session.state = "signup.chooseType";
-    session.signup = { user_type: "", data: {}, files: {} };
+    session.signup = {
+        user_type: "",
+        data: {},
+    };
     await session.save();
 
     await sendQuickReplies(
@@ -55,350 +34,512 @@ export async function startSignupFlow(phone, session) {
             { title: "Individual", postbackText: "type_ind" },
             { title: "Back", postbackText: "back_login" },
         ],
-        "Let’s get you onboarded.\nChoose the account type:",
+        "Let’s get you onboarded.\nPlease choose your account type:",
         "Logistos Signup",
         "Select type"
     );
 }
 
-/**
- * Central step handler for signup
- * Call this from your webhook whenever session.state starts with "signup."
- */
-export async function handleSignupStep(phone, session, msg, interactiveType, rawPayload = {}) {
-    if (!session.signup) {
-        session.signup = { user_type: "", data: {}, files: {} };
-    }
-    if (!session.state || !session.state.startsWith("signup.")) {
-        session.state = "signup.chooseType";
-    }
-    await session.save();
-    const lower = (msg || "").toLowerCase().trim();
+// ---------- central handler ----------
+export async function handleSignupStep(
+    phone,
+    session,
+    msg,
+    interactiveType,
+    rawPayload = {}
+) {
+    const text = (msg || "").trim();
+    const lower = text.toLowerCase();
 
-    // Allow switching back to login
-    if (lower === "login" || lower === "back_login") {
+    // If signup object is missing or state not in signup.*, tell user to restart
+    if (!session.signup || !session.state || !session.state.startsWith("signup.")) {
+        await sendMessage(
+            phone,
+            "It looks like your signup session expired. Please type *signup* to start again."
+        );
+        session.state = "awaiting_login_or_signup";
+        delete session.signup;
+        await session.save();
+        return;
+    }
+
+    // Quick escape back to login
+    if (["login", "back_login", "back"].includes(lower)) {
         session.state = "awaiting_email";
+        delete session.signup;
         await session.save();
         await sendMessage(phone, "Redirecting to login. Please enter your *email*.");
         return;
     }
 
-    // ---- choose type ----
+    const signup = session.signup;
+    const data = signup.data || (signup.data = {});
+
+    // ---------- STEP: choose type ----------
     if (session.state === "signup.chooseType") {
-        const choose = (t) => {
-            session.signup.user_type = t;
-            session.state = "signup.collect.basic";
-        };
+        if (["type_org", "organization", "org", "1"].includes(lower)) {
+            signup.user_type = "organization";
+            session.state = "signup.org.client_name";
+            await session.save();
+            await sendMessage(
+                phone,
+                "You selected *Organization*.\n\nPlease enter your *Client Name* (Business / Company Name):"
+            );
+            return;
+        }
 
-        if (["type_org", "organization", "signup_organization"].includes(lower)) choose("organization");
-        else if (["type_ind", "individual", "signup_individual"].includes(lower)) choose("individual");
-        else return await sendMessage(phone, "Please choose *Organization* or *Individual*.");
+        if (["type_ind", "individual", "ind", "2"].includes(lower)) {
+            signup.user_type = "individual";
+            session.state = "signup.ind.client_name";
+            await session.save();
+            await sendMessage(
+                phone,
+                "You selected *Individual*.\n\nPlease enter your *Full Name*:"
+            );
+            return;
+        }
 
-        await session.save();
         await sendMessage(
             phone,
-            session.signup.user_type === "organization"
-                ? "Please send the following *comma-separated*:\nClient Name, Signatory Name, First Name, Last Name, Email, Phone"
-                : "Please send the following *comma-separated*:\nFull Name, Email, Phone"
+            "Please choose a valid option:\n*Organization* or *Individual*."
         );
         return;
     }
 
-    // ---- collect basic ----
-    if (session.state === "signup.collect.basic") {
-        const parts = msg.split(",").map(s => s.trim()).filter(Boolean);
-
-        if (session.signup.user_type === "organization") {
-            if (parts.length < 6) {
-                await sendMessage(phone, "Need all 6 fields: Client Name, Signatory Name, First Name, Last Name, Email, Phone");
+    // ========================================================================
+    //                           ORGANIZATION FLOW
+    // ========================================================================
+    if (signup.user_type === "organization") {
+        // Client Name
+        if (session.state === "signup.org.client_name") {
+            if (!text) {
+                await sendMessage(
+                    phone,
+                    "Client Name is required.\nPlease enter your *Client Name*:"
+                );
                 return;
             }
-            const [client_name, authorised_signatory_name, user_first_name, user_last_name, user_email, client_contact_number] = parts;
+            data.client_name = text;
+            // requirement: authorised_signatory_name = client_name
+            data.authorised_signatory_name = text;
 
-            if (!isEmail(user_email)) return sendMessage(phone, "Enter a *valid email*.");
-            if (!isPhone10(client_contact_number)) return sendMessage(phone, "Enter a *valid 10-digit phone number*.");
-
-            session.signup.data = {
-                client_name,
-                authorised_signatory_name,
-                user_first_name,
-                user_last_name,
-                user_email,
-                client_contact_number,
-                user_type: "organization",
-            };
-            session.state = "signup.collect.pan";
+            session.state = "signup.org.first_name";
             await session.save();
-            await sendMessage(phone, "Enter *PAN Number* (e.g., ABCDE1234F).");
+            await sendMessage(
+                phone,
+                "Please enter *First Name* of the primary user:"
+            );
             return;
         }
 
-        // individual
-        if (parts.length < 3) {
-            await sendMessage(phone, "Need 3 fields: Full Name, Email, Phone");
+        // First Name
+        if (session.state === "signup.org.first_name") {
+            if (!text) {
+                await sendMessage(
+                    phone,
+                    "First Name is required.\nPlease enter your *First Name*:"
+                );
+                return;
+            }
+            data.user_first_name = text;
+
+            session.state = "signup.org.last_name";
+            await session.save();
+            await sendMessage(phone, "Please enter *Last Name*:");
             return;
         }
-        const [fullName, user_email, client_contact_number] = parts;
-        if (!isEmail(user_email)) return sendMessage(phone, "Enter a *valid email*.");
-        if (!isPhone10(client_contact_number)) return sendMessage(phone, "Enter a *valid 10-digit phone number*.");
 
-        const nameParts = fullName.split(" ");
-        const user_last_name = nameParts.pop() || "";
-        const user_first_name = nameParts.join(" ") || fullName;
+        // Last Name
+        if (session.state === "signup.org.last_name") {
+            if (!text) {
+                await sendMessage(
+                    phone,
+                    "Last Name is required.\nPlease enter your *Last Name*:"
+                );
+                return;
+            }
+            data.user_last_name = text;
 
-        session.signup.data = {
-            client_name: fullName,
-            authorised_signatory_name: fullName,
-            user_first_name,
-            user_last_name,
-            user_email,
-            client_contact_number,
-            user_type: "individual",
-        };
-        session.state = "signup.collect.pan";
-        await session.save();
-        await sendMessage(phone, "Enter *PAN Number* (e.g., ABCDE1234F).");
-        return;
+            session.state = "signup.org.email";
+            await session.save();
+            await sendMessage(phone, "Please enter your *Email*:");
+            return;
+        }
+
+        // Email
+        if (session.state === "signup.org.email") {
+            if (!isEmail(text)) {
+                await sendMessage(
+                    phone,
+                    "That doesn't look like a valid email.\nPlease enter a *valid Email* (example: name@example.com):"
+                );
+                return;
+            }
+            data.user_email = text;
+
+            session.state = "signup.org.phone";
+            await session.save();
+            await sendMessage(
+                phone,
+                "Please enter your *10-digit Phone Number* (digits only):"
+            );
+            return;
+        }
+
+        // Phone
+        if (session.state === "signup.org.phone") {
+            const digits = text.replace(/\D/g, "");
+            if (!isPhone10(digits)) {
+                await sendMessage(
+                    phone,
+                    "Please enter a *valid 10-digit Phone Number* (digits only):"
+                );
+                return;
+            }
+            data.client_contact_number = digits;
+
+            session.state = "signup.org.pan";
+            await session.save();
+            await sendMessage(
+                phone,
+                "Please enter your *PAN Number* (e.g., ABCDE1234F):"
+            );
+            return;
+        }
+
+        // PAN
+        if (session.state === "signup.org.pan") {
+            const pan = text.toUpperCase().replace(/\s/g, "");
+            if (!isPAN(pan)) {
+                await sendMessage(
+                    phone,
+                    "Invalid PAN format.\nPAN should be 5 letters, 4 digits, 1 letter (e.g., ABCDE1234F).\n\nPlease enter your *PAN Number* again:"
+                );
+                return;
+            }
+            data.pan_no = pan;
+
+            session.state = "signup.org.gst";
+            await session.save();
+            await sendMessage(
+                phone,
+                "Please enter your *GST Number* (e.g., 22ABCDE1234F1Z5):"
+            );
+            return;
+        }
+
+        // GST (required for organization)
+        if (session.state === "signup.org.gst") {
+            const gst = text.toUpperCase().replace(/\s/g, "");
+            if (!isGST(gst)) {
+                await sendMessage(
+                    phone,
+                    "Invalid GST format.\nExample: 22ABCDE1234F1Z5.\n\nPlease enter your *GST Number* again:"
+                );
+                return;
+            }
+            data.gst_no = gst;
+
+            // Move to review
+            session.state = "signup.review";
+            await session.save();
+            await sendReviewMessage(phone, session);
+            return;
+        }
     }
 
-    // ---- PAN number ----
-    if (session.state === "signup.collect.pan") {
-        const pan = msg.replace(/\s/g, "").toUpperCase();
-        if (!isPAN(pan)) {
-            await sendMessage(phone, "Invalid PAN. Format: 5 letters + 4 digits + 1 letter (e.g., ABCDE1234F).");
+    // ========================================================================
+    //                           INDIVIDUAL FLOW
+    // ========================================================================
+    if (signup.user_type === "individual") {
+        // Client Name / Full Name
+        if (session.state === "signup.ind.client_name") {
+            if (!text) {
+                await sendMessage(
+                    phone,
+                    "Full Name is required.\nPlease enter your *Full Name*:"
+                );
+                return;
+            }
+            const fullName = text;
+            const parts = fullName.trim().split(/\s+/);
+            const last = parts.length > 1 ? parts.pop() : "";
+            const first = parts.join(" ") || fullName;
+
+            data.client_name = fullName;
+            // requirement: signatory = client_name
+            data.authorised_signatory_name = fullName;
+            data.user_first_name = first;
+            data.user_last_name = last || "";
+
+            session.state = "signup.ind.email";
+            await session.save();
+            await sendMessage(phone, "Please enter your *Email*:");
             return;
         }
-        session.signup.data.pan_no = pan;
-        session.state = session.signup.user_type === "organization" ? "signup.collect.gst" : "signup.upload.panFile";
-        await session.save();
 
-        if (session.signup.user_type === "organization") {
-            await sendMessage(phone, "Enter *GST Number* (e.g., 22ABCDE1234F1Z5).");
-        } else {
+        // Email
+        if (session.state === "signup.ind.email") {
+            if (!isEmail(text)) {
+                await sendMessage(
+                    phone,
+                    "That doesn't look like a valid email.\nPlease enter a *valid Email* (example: name@example.com):"
+                );
+                return;
+            }
+            data.user_email = text;
+
+            session.state = "signup.ind.phone";
+            await session.save();
+            await sendMessage(
+                phone,
+                "Please enter your *10-digit Phone Number* (digits only):"
+            );
+            return;
+        }
+
+        // Phone
+        if (session.state === "signup.ind.phone") {
+            const digits = text.replace(/\D/g, "");
+            if (!isPhone10(digits)) {
+                await sendMessage(
+                    phone,
+                    "Please enter a *valid 10-digit Phone Number* (digits only):"
+                );
+                return;
+            }
+            data.client_contact_number = digits;
+
+            session.state = "signup.ind.pan";
+            await session.save();
+            await sendMessage(
+                phone,
+                "Please enter your *PAN Number* (e.g., ABCDE1234F):"
+            );
+            return;
+        }
+
+        // PAN
+        if (session.state === "signup.ind.pan") {
+            const pan = text.toUpperCase().replace(/\s/g, "");
+            if (!isPAN(pan)) {
+                await sendMessage(
+                    phone,
+                    "Invalid PAN format.\nPAN should be 5 letters, 4 digits, 1 letter (e.g., ABCDE1234F).\n\nPlease enter your *PAN Number* again:"
+                );
+                return;
+            }
+            data.pan_no = pan;
+
+            session.state = "signup.ind.gst";
+            await session.save();
             await sendQuickReplies(
                 phone,
                 [
-                    { title: "Upload PAN", postbackText: "upload_pan" },
-                    { title: "Skip", postbackText: "skip_pan" }
+                    { title: "Enter GST", postbackText: "enter_gst" },
+                    { title: "Skip", postbackText: "skip_gst" },
                 ],
-                "Please *upload PAN card file* now (PDF/JPG/PNG).\nYou can also *Skip* and complete signup without the file.",
-                "Upload PAN",
+                "If you have a *GST Number*, please enter it now.\nOtherwise, you can *Skip*.",
+                "GST Number",
                 "Optional"
             );
-        }
-        return;
-    }
-
-    // ---- GST number (org required; individual optional but we mirror web: not shown here for individual) ----
-    if (session.state === "signup.collect.gst") {
-        const gst = msg.replace(/\s/g, "").toUpperCase();
-        if (!isGST(gst)) {
-            await sendMessage(phone, "Invalid GST. Format example: 22ABCDE1234F1Z5.");
             return;
         }
-        session.signup.data.gst_no = gst;
-        session.state = "signup.upload.panFile";
-        await session.save();
-        await sendQuickReplies(
-            phone,
-            [
-                { title: "Upload PAN", postbackText: "upload_pan" },
-                { title: "Skip", postbackText: "skip_pan" }
-            ],
-            "Please *upload PAN card file* now (PDF/JPG/PNG).\nYou can also *Skip* and complete signup without the file.",
-            "Upload PAN",
-            "Optional"
-        );
-        return;
-    }
 
-    // ---- PAN file upload ----
-    if (session.state === "signup.upload.panFile") {
-        const { mediaUrl, postback, text } = extractMediaAndPostback(rawPayload, msg);
-
-        // If user chose skip via quick reply or typed 'skip'
-        if ([postback, text?.toLowerCase()].some(v => v === "skip_pan" || v === "skip")) {
-            session.signup.files.pan_card_copy_url = null; // explicit: user skipped
-            session.state = session.signup.user_type === "organization" ? "signup.upload.gstFile" : "signup.confirm";
-            await session.save();
-
-            if (session.signup.user_type === "organization") {
-                await sendQuickReplies(
-                    phone,
-                    [
-                        { title: "Upload GST", postbackText: "upload_gst" },
-                        { title: "Skip", postbackText: "skip_gst" }
-                    ],
-                    "You chose to skip PAN upload. Now, please upload *GST Registration Certificate* or Skip.",
-                    "Upload GST",
-                    "Optional"
-                );
+        // GST (optional for individual)
+        if (session.state === "signup.ind.gst") {
+            if (["skip_gst", "skip"].includes(lower)) {
+                data.gst_no = "";
+            } else if (text) {
+                const gst = text.toUpperCase().replace(/\s/g, "");
+                if (!isGST(gst)) {
+                    await sendMessage(
+                        phone,
+                        "Invalid GST format.\nExample: 22ABCDE1234F1Z5.\n\nPlease enter your *GST Number* again or type *skip*:"
+                    );
+                    return;
+                }
+                data.gst_no = gst;
             } else {
-                await sendMessage(phone, "You chose to skip PAN upload. Almost done. Type *confirm* to submit or *cancel* to discard.");
+                data.gst_no = "";
             }
-            return;
-        }
 
-        // If a media URL is present, accept it and continue
-        if (mediaUrl) {
-            session.signup.files.pan_card_copy_url = mediaUrl;
-            session.state = session.signup.user_type === "organization" ? "signup.upload.gstFile" : "signup.confirm";
+            session.state = "signup.review";
             await session.save();
-
-            if (session.signup.user_type === "organization") {
-                await sendQuickReplies(
-                    phone,
-                    [
-                        { title: "Upload GST", postbackText: "upload_gst" },
-                        { title: "Skip", postbackText: "skip_gst" }
-                    ],
-                    "Now upload *GST Registration Certificate* (PDF/JPG/PNG) or choose Skip to continue without it.",
-                    "Upload GST",
-                    "Optional"
-                );
-            } else {
-                await sendMessage(phone, "PAN received. Almost done. Type *confirm* to submit or *cancel* to discard.");
-            }
+            await sendReviewMessage(phone, session);
             return;
         }
-
-        // No media & no skip — re-prompt but show skip option so the user isn't trapped
-        await sendQuickReplies(
-            phone,
-            [
-                { title: "Upload PAN", postbackText: "upload_pan" },
-                { title: "Skip", postbackText: "skip_pan" }
-            ],
-            "Please upload a *file* for PAN (PDF/JPG/PNG) — or press *Skip* to continue without uploading.",
-            "Upload PAN",
-            "Optional"
-        );
-        return;
     }
 
-    // ---- GST file upload (org only) ----
-    if (session.state === "signup.upload.gstFile") {
-        const { mediaUrl, postback, text } = extractMediaAndPostback(rawPayload, msg);
-
-        if ([postback, text?.toLowerCase()].some(v => v === "skip_gst" || v === "skip")) {
-            session.signup.files.gst_registration_certificate_url = null;
-            session.state = "signup.confirm";
-            await session.save();
-            await sendMessage(phone, "You chose to skip GST upload. Type *confirm* to submit or *cancel* to discard.");
+    // ========================================================================
+    //                                REVIEW
+    // ========================================================================
+    if (session.state === "signup.review") {
+        // Accept numbers or words for options
+        if (["1", "confirm", "submit", "confirm & submit"].includes(lower)) {
+            await performSubmit(phone, session);
             return;
         }
 
-        if (mediaUrl) {
-            session.signup.files.gst_registration_certificate_url = mediaUrl;
-            session.state = "signup.confirm";
+        if (["2", "restart", "start over"].includes(lower)) {
+            // start fresh
+            session.state = "signup.chooseType";
+            session.signup = { user_type: "", data: {} };
             await session.save();
-            await sendMessage(phone, "Great! Type *confirm* to submit or *cancel* to discard.");
+            await sendQuickReplies(
+                phone,
+                [
+                    { title: "Organization", postbackText: "type_org" },
+                    { title: "Individual", postbackText: "type_ind" },
+                ],
+                "Alright, let's start again.\nPlease choose your account type:",
+                "Logistos Signup",
+                "Select type"
+            );
             return;
         }
 
-        await sendQuickReplies(
-            phone,
-            [
-                { title: "Upload GST", postbackText: "upload_gst" },
-                { title: "Skip", postbackText: "skip_gst" }
-            ],
-            "Please upload the *GST Registration Certificate* (PDF/JPG/PNG) — or press *Skip* to continue without uploading.",
-            "Upload GST",
-            "Optional"
-        );
-        return;
-    }
-
-
-    // ---- confirm / cancel ----
-    if (session.state === "signup.confirm") {
-        if (lower === "cancel") {
-            delete session.signup;
+        if (["3", "cancel"].includes(lower)) {
             session.state = "awaiting_login_or_signup";
-            await session.save();
-            await sendMessage(phone, "Signup cancelled.");
-            return;
-        }
-        if (lower !== "confirm") {
-            await sendMessage(phone, "Type *confirm* to submit or *cancel* to discard.");
-            return;
-        }
-
-        // Submit
-        try {
-            session.state = "signup.submitting";
-            await session.save();
-
-            // --- Build an explicit payload to avoid missing required fields on the backend ---
-            // Ensure client_name and authorised_signatory_name are present
-            const sdata = session.signup.data || {};
-            const sfiles = session.signup.files || {};
-
-            // If we only have first/last name but not client_name, create one
-            const client_name_fallback = sdata.client_name
-                || (sdata.user_first_name && sdata.user_last_name && `${sdata.user_first_name} ${sdata.user_last_name}`)
-                || (sdata.user_first_name) || "";
-
-            const authorised_signatory_name_fallback =
-                sdata.authorised_signatory_name || client_name_fallback;
-
-            const payload = {
-                client_name: client_name_fallback,
-                authorised_signatory_name: authorised_signatory_name_fallback,
-                user_first_name: sdata.user_first_name || "",
-                user_last_name: sdata.user_last_name || "",
-                user_email: sdata.user_email || sdata.email || "",
-                client_contact_number: sdata.client_contact_number || sdata.phone || "",
-                pan_no: sdata.pan_no || "",
-                gst_no: sdata.gst_no || "",
-                created_by: sdata.created_by || "1",
-                // file URLs (may be null if user skipped)
-                pan_card_copy_url: sfiles.pan_card_copy_url ?? null,
-                gst_registration_certificate_url: sfiles.gst_registration_certificate_url ?? null,
-            };
-
-            // Optional: quick sanity check before calling API
-            // (don't block submit — backend will validate, but this helps surface missing fields quickly)
-            console.log("Signup payload being submitted:", payload);
-
-            const apiRes = await signupAPI(payload);
-
-            // Success — reset user back to login
-            session.state = "awaiting_email";
             delete session.signup;
             await session.save();
-
             await sendMessage(
                 phone,
-                `✅ Signup successful!\nReference: ${apiRes?.id ?? "N/A"}\nPlease login with your email and password.`
+                "Signup cancelled. You can type *signup* anytime to start again."
             );
-        } catch (e) {
-            session.state = "signup.confirm";
-            await session.save();
+            return;
+        }
 
-            // Show real error details to the user (and log)
-            const apiErr = e?.response?.data || e?.message || e;
-            console.error("❌ signupAPI error:", apiErr);
+        // If something else, just re-show review message
+        await sendMessage(
+            phone,
+            "Please reply with:\n*1* – Confirm & Submit\n*2* – Start Over\n*3* – Cancel"
+        );
+        return;
+    }
 
-            // If API returned a JSON object with field errors, pretty-print it
-            let errText = "";
-            try {
-                if (typeof apiErr === "object") {
-                    errText = JSON.stringify(apiErr, null, 2);
-                } else {
-                    errText = String(apiErr);
-                }
-            } catch {
+    // Fallback: unknown step inside signup flow
+    await sendMessage(
+        phone,
+        "Something went wrong with the signup flow. Please type *signup* to start again."
+    );
+    session.state = "awaiting_login_or_signup";
+    delete session.signup;
+    await session.save();
+}
+
+// ---------- helper: send review summary ----------
+async function sendReviewMessage(phone, session) {
+    const { user_type, data } = session.signup;
+    const isOrg = user_type === "organization";
+
+    const lines = [
+        "*Please review your details:*",
+        "",
+        `Account Type: *${isOrg ? "Organization" : "Individual"}*`,
+        `Client Name: *${data.client_name || "-"}*`,
+        `Signatory Name: *${data.authorised_signatory_name || "-"}*`,
+        `First Name: *${data.user_first_name || "-"}*`,
+        `Last Name: *${data.user_last_name || "-"}*`,
+        `Email: *${data.user_email || "-"}*`,
+        `Phone: *${data.client_contact_number || "-"}*`,
+        `PAN Number: *${data.pan_no || "-"}*`,
+        `GST Number: *${data.gst_no || (isOrg ? "-" : "Not provided")}*`,
+        "",
+        "If everything looks correct, please choose:",
+        "*1* – Confirm & Submit",
+        "*2* – Start Over",
+        "*3* – Cancel",
+    ];
+
+    await sendMessage(phone, lines.join("\n"));
+}
+
+// ---------- helper: perform submit ----------
+async function performSubmit(phone, session) {
+    const { user_type, data } = session.signup;
+
+    // Basic local check (similar to web validate) :contentReference[oaicite:1]{index=1}
+    if (!data.client_name || !data.user_email || !data.client_contact_number || !data.pan_no) {
+        await sendMessage(
+            phone,
+            "Some required fields are missing.\nPlease type *signup* to start again and fill all details."
+        );
+        session.state = "awaiting_login_or_signup";
+        delete session.signup;
+        await session.save();
+        return;
+    }
+
+    if (user_type === "organization" && !data.gst_no) {
+        await sendMessage(
+            phone,
+            "GST Number is required for organizations. Please type *signup* to start again."
+        );
+        session.state = "awaiting_login_or_signup";
+        delete session.signup;
+        await session.save();
+        return;
+    }
+
+    try {
+        session.state = "signup.submitting";
+        await session.save();
+
+        const payload = {
+            client_name: data.client_name,
+            authorised_signatory_name:
+                data.authorised_signatory_name || data.client_name,
+            user_first_name: data.user_first_name || "",
+            user_last_name: data.user_last_name || "",
+            user_email: data.user_email,
+            client_contact_number: data.client_contact_number,
+            pan_no: data.pan_no,
+            gst_no: data.gst_no || "",
+            created_by: "1",
+            user_type: user_type, // match web code :contentReference[oaicite:2]{index=2}
+        };
+
+        console.log("Signup payload being submitted:", payload);
+
+        const apiRes = await signupAPI(payload);
+
+        // Back to login state
+        session.state = "awaiting_email";
+        delete session.signup;
+        await session.save();
+
+        await sendMessage(
+            phone,
+            "✅ *Signup successful!*\n\nYour onboarding is in process. " +
+            "Please check your email for verification.\n\n" +
+            "Now, please login with your email and password."
+        );
+    } catch (e) {
+        const apiErr = e?.response?.data || e?.message || e;
+        console.error("❌ signupAPI error:", apiErr);
+
+        let errText = "";
+        try {
+            if (typeof apiErr === "object") {
+                errText = JSON.stringify(apiErr, null, 2);
+            } else {
                 errText = String(apiErr);
             }
-
-            // Send the real error back to user (trim if too long)
-            const short = errText.length > 900 ? errText.slice(0, 900) + "...(truncated)" : errText;
-            await sendMessage(phone, `❌ Signup failed: ${short}`);
-
-            // Helpful tip message so the user knows what to try
-            await sendMessage(phone, "If the error mentions missing fields, please re-check your inputs or restart signup by typing *signup*.");
+        } catch {
+            errText = String(apiErr);
         }
-        return;
+
+        const short =
+            errText.length > 900 ? errText.slice(0, 900) + "...(truncated)" : errText;
+
+        await sendMessage(
+            phone,
+            `❌ Signup failed. The server responded with:\n\`\`\`\n${short}\n\`\`\`\n` +
+            "Please review the message and try again, or type *signup* to start over."
+        );
+
+        session.state = "signup.review"; // let user decide again
+        await session.save();
     }
 }
