@@ -6,6 +6,18 @@ import createTicketAPI from "../APIS/createTicketAPI.js";
 import getMyDetailsAPI from "../APIS/getMyDetailsAPI.js";
 import getTicketDetailsAPI from "../APIS/getTicketDetailsAPI.js";
 
+// In–memory state per phone: { status, draft }
+const ticketStore = new Map();
+
+const getTicketState = (phone) => {
+    let st = ticketStore.get(phone);
+    if (!st) {
+        st = { status: "ticket_home", draft: {} };
+        ticketStore.set(phone, st);
+    }
+    return st;
+};
+
 export const TYPES = {
     ndr_related: "NDR Related",
     weight_variance_related: "Weight Variance Related",
@@ -46,10 +58,19 @@ const SKIP = "skip";
 
 /** Start flow: home screen (Create / Status) */
 export const startTicketFlow = async (phone, session) => {
+    // reset memory state too
+    ticketStore.set(phone, { status: "ticket_home", draft: {} });
+
     session.operation = "ticketing";
-    session.ticketStatus = "ticket_home";
-    session.ticketDraft = {};
+    session.ticketStatus = undefined; // we don't rely on Mongo for status
+    session.ticketDraft = undefined;
     await session.save();
+
+    console.log("=== [TICKET DEBUG] startTicketFlow ===", {
+        phone,
+        memState: ticketStore.get(phone),
+        dbState: { operation: session.operation, ticketStatus: session.ticketStatus },
+    });
 
     await sendListMessage(
         phone,
@@ -78,8 +99,13 @@ const ensureClientId = async (phone, Session) => {
     return session?.client_id ? Number(session.client_id) : null;
 };
 
-const setDraft = async (session, patch) => {
-    session.ticketDraft = { ...(session.ticketDraft || {}), ...patch };
+const setDraft = async (phone, session, patch) => {
+    const st = getTicketState(phone);
+    st.draft = { ...(st.draft || {}), ...patch };
+    ticketStore.set(phone, st); // persist in memory
+
+    // optional: store a snapshot in Mongo just for debug/inspection
+    session.ticketDraft = st.draft;
     session.markModified && session.markModified("ticketDraft");
     await session.save();
 };
@@ -129,46 +155,53 @@ const ticketCreateHelper = async (phone, msg = "") => {
     const text = String(msg || "").trim();
     const lower = text.toLowerCase();
 
+    const mem = getTicketState(phone);
+
     console.log("=== [TICKET DEBUG] Incoming ===", {
         phone,
         text,
         lower,
-        ticketStatus: session.ticketStatus,
-        operation: session.operation,
-        ticketDraft: session.ticketDraft,
+        memStatus: mem.status,
+        memDraft: mem.draft,
+        dbStatus: session.ticketStatus,
+        dbOperation: session.operation,
     });
 
     // global commands
     if (lower === "logout") {
+        ticketStore.delete(phone);
         await sendMessage(phone, "You have been logged out. Type *hi* to log in again.");
         await Session.deleteOne({ phone });
         return;
     }
 
     if (lower === "restart") {
-        session.operation = null;
-        session.ticketStatus = null;
-        session.ticketDraft = {};
+        ticketStore.set(phone, { status: "ticket_home", draft: {} });
+        session.operation = "ticketing";
+        session.ticketStatus = undefined;
+        session.ticketDraft = undefined;
         await session.save();
         return startTicketFlow(phone, session);
     }
 
     // allow starting status flow from anywhere
-    // allow starting status flow from anywhere
     if (["ticket_status", "status", "ticket status", "track ticket"].includes(lower)) {
-        console.log("=== [TICKET DEBUG] switching to status_ask_ids ===", {
-            prevStatus: session.ticketStatus,
-            operation: session.operation,
+        console.log("=== [TICKET DEBUG] switching to status_ask_ids (mem) ===", {
+            prevMemStatus: mem.status,
         });
 
+        mem.status = "status_ask_ids";
+        mem.draft = {};
+        ticketStore.set(phone, mem);
+
         session.operation = "ticketing";
-        session.ticketStatus = "status_ask_ids";
-        session.ticketDraft = {};
+        session.ticketStatus = undefined;
+        session.ticketDraft = undefined;
         await session.save();
 
-        console.log("=== [TICKET DEBUG] after save ===", {
-            ticketStatus: session.ticketStatus,
-            operation: session.operation,
+        console.log("=== [TICKET DEBUG] after status switch ===", {
+            memStatus: mem.status,
+            dbStatus: session.ticketStatus,
         });
 
         await sendMessage(
@@ -178,16 +211,20 @@ const ticketCreateHelper = async (phone, msg = "") => {
         return;
     }
 
-    let st = session.ticketStatus || "ticket_home";
+    // current logical state always from memory
+    let st = mem.status || "ticket_home";
 
     switch (st) {
         /* ------------------ HOME: Create / Status ------------------ */
         case "ticket_home": {
-            if (["ticket_create", "create", "new", "create ticket"].includes(lower)) {
-                // go to type selection
-                session.ticketStatus = "choose_type";
+            if (["ticket_create", "create", "new", "create ticket", "ticket"].includes(lower)) {
+                mem.status = "choose_type";
+                mem.draft = {};
+                ticketStore.set(phone, mem);
+
                 session.operation = "ticketing";
-                session.ticketDraft = {};
+                session.ticketStatus = undefined;
+                session.ticketDraft = undefined;
                 await session.save();
 
                 const typeOptions = Object.keys(TYPES).map((key) => ({
@@ -206,14 +243,14 @@ const ticketCreateHelper = async (phone, msg = "") => {
                 return;
             }
 
-            if (
-                ["ticket_status", "status", "ticket status", "track ticket"].includes(
-                    lower
-                )
-            ) {
-                session.ticketStatus = "status_ask_ids";
+            if (["ticket_status", "status", "ticket status", "track ticket"].includes(lower)) {
+                mem.status = "status_ask_ids";
+                mem.draft = {};
+                ticketStore.set(phone, mem);
+
                 session.operation = "ticketing";
-                session.ticketDraft = {};
+                session.ticketStatus = undefined;
+                session.ticketDraft = undefined;
                 await session.save();
 
                 await sendMessage(
@@ -224,16 +261,15 @@ const ticketCreateHelper = async (phone, msg = "") => {
             }
 
             if (["back"].includes(lower)) {
-                // go back to your main bot menu (state depends on your app)
+                ticketStore.delete(phone);
                 session.operation = null;
-                session.ticketStatus = null;
-                session.ticketDraft = {};
+                session.ticketStatus = undefined;
+                session.ticketDraft = undefined;
                 await session.save();
                 await sendMessage(phone, "Okay, taking you back to the main menu.");
                 return;
             }
 
-            // if user sent something else, re-show options
             await sendListMessage(
                 phone,
                 "Logistos Bot",
@@ -268,9 +304,9 @@ const ticketCreateHelper = async (phone, msg = "") => {
                 );
                 return;
             }
-            await setDraft(session, { type_key: text });
-            session.ticketStatus = "choose_subtype";
-            await session.save();
+            await setDraft(phone, session, { type_key: text });
+            mem.status = "choose_subtype";
+            ticketStore.set(phone, mem);
 
             const keys = TYPE_TO_SUBTYPES[text] || [];
             const opts = keys.map((k) => ({
@@ -291,7 +327,8 @@ const ticketCreateHelper = async (phone, msg = "") => {
         case "choose_subtype": {
             const valid = Object.prototype.hasOwnProperty.call(SUBTYPES, text);
             if (!valid) {
-                const keys = TYPE_TO_SUBTYPES[session.ticketDraft?.type_key] || [];
+                const typeKey = mem.draft?.type_key;
+                const keys = TYPE_TO_SUBTYPES[typeKey] || [];
                 const opts = keys.map((k) => ({
                     title: SUBTYPES[k],
                     postbackText: k,
@@ -306,18 +343,18 @@ const ticketCreateHelper = async (phone, msg = "") => {
                 );
                 return;
             }
-            await setDraft(session, { subtype_key: text });
-            session.ticketStatus = "need_shipment";
-            await session.save();
+            await setDraft(phone, session, { subtype_key: text });
+            mem.status = "need_shipment";
+            ticketStore.set(phone, mem);
             return sendMessage(phone, "Enter shipment #:");
         }
 
         case "need_shipment": {
             if (!text)
                 return sendMessage(phone, "Shipment # is required. Please enter it:");
-            await setDraft(session, { shipment_id: text });
-            session.ticketStatus = "need_awb";
-            await session.save();
+            await setDraft(phone, session, { shipment_id: text });
+            mem.status = "need_awb";
+            ticketStore.set(phone, mem);
 
             await sendQuickReplies(
                 phone,
@@ -331,33 +368,35 @@ const ticketCreateHelper = async (phone, msg = "") => {
 
         case "need_awb": {
             if (lower !== SKIP) {
-                await setDraft(session, { awb: text });
+                await setDraft(phone, session, { awb: text });
             } else {
-                await setDraft(session, { awb: undefined });
+                await setDraft(phone, session, { awb: undefined });
             }
-            session.ticketStatus = "need_details";
-            await session.save();
+            mem.status = "need_details";
+            ticketStore.set(phone, mem);
             return sendMessage(phone, "Add a brief description (optional):");
         }
 
         case "need_details": {
             const note = text || "";
-            await setDraft(session, { note });
+            await setDraft(phone, session, { note });
 
-            const client_id = await ensureClientId(phone, Session);
+            const SessionModel = Session; // for clarity
+            const client_id = await ensureClientId(phone, SessionModel);
             if (!client_id) {
                 await sendMessage(
                     phone,
                     "Your account isn’t linked yet. Please type *hi* and login again."
                 );
+                ticketStore.delete(phone);
                 session.operation = null;
-                session.ticketStatus = null;
+                session.ticketStatus = undefined;
+                session.ticketDraft = undefined;
                 await session.save();
                 return;
             }
 
-            const { type_key, subtype_key, shipment_id, awb } =
-                session.ticketDraft || {};
+            const { type_key, subtype_key, shipment_id, awb } = mem.draft || {};
 
             if (!type_key) {
                 await sendMessage(
@@ -394,9 +433,11 @@ const ticketCreateHelper = async (phone, msg = "") => {
             try {
                 const resp = await createTicketAPI(phone, payload);
 
+                ticketStore.set(phone, { status: "ticket_home", draft: {} });
+
                 session.operation = null;
-                session.ticketStatus = "done";
-                session.ticketDraft = {};
+                session.ticketStatus = undefined;
+                session.ticketDraft = undefined;
                 await session.save();
 
                 const id = resp?.id ?? resp?.ticket_id ?? "N/A";
@@ -420,8 +461,8 @@ const ticketCreateHelper = async (phone, msg = "") => {
                     "❌ Ticket create error:",
                     err?.response?.data || err?.message || err
                 );
-                session.ticketStatus = "need_details";
-                await session.save();
+                mem.status = "need_details";
+                ticketStore.set(phone, mem);
                 await sendMessage(
                     phone,
                     "Couldn’t create it now. Try again or type *restart*."
@@ -436,7 +477,7 @@ const ticketCreateHelper = async (phone, msg = "") => {
             console.log("=== [TICKET DEBUG] in status_ask_ids ===", {
                 phone,
                 text,
-                ticketStatus: session.ticketStatus,
+                memStatus: mem.status,
             });
 
             const parts = text
@@ -452,7 +493,7 @@ const ticketCreateHelper = async (phone, msg = "") => {
             if (!ids.length) {
                 await sendMessage(
                     phone,
-                    "Please send one or more *numeric Ticket IDs* separated by commas.\n\nExample: `69, 99, 1769`"
+                    "Please send one or more *numeric Ticket IDs* separated by commas.\n\nExample: `296, 9999999, 290`"
                 );
                 return;
             }
@@ -466,11 +507,10 @@ const ticketCreateHelper = async (phone, msg = "") => {
                 console.log("=== [TICKET DEBUG] API response ===", details);
 
                 const formatted = formatTicketDetails(details, ids);
-
                 await sendMessage(phone, formatted);
 
-                session.ticketStatus = "status_done";
-                await session.save();
+                mem.status = "status_done";
+                ticketStore.set(phone, mem);
 
                 await sendListMessage(
                     phone,
@@ -494,35 +534,50 @@ const ticketCreateHelper = async (phone, msg = "") => {
                     phone,
                     "Couldn’t fetch ticket status right now. Please try again later or check from the web portal."
                 );
-                session.ticketStatus = "status_ask_ids";
-                await session.save();
+                mem.status = "status_ask_ids";
+                ticketStore.set(phone, mem);
             }
             return;
         }
 
         case "status_done": {
             if (["ticket_create", "ticket", "create", "new ticket"].includes(lower)) {
-                session.ticketStatus = "choose_type";
+                mem.status = "choose_type";
+                mem.draft = {};
+                ticketStore.set(phone, mem);
+
                 session.operation = "ticketing";
-                session.ticketDraft = {};
                 await session.save();
-                return startTicketFlow(phone, session);
+
+                const typeOptions = Object.keys(TYPES).map((key) => ({
+                    title: TYPES[key],
+                    postbackText: key,
+                }));
+
+                await sendListMessage(
+                    phone,
+                    "Logistos Bot",
+                    "Choose a category:",
+                    typeOptions,
+                    "",
+                    "Open options"
+                );
+                return;
             }
-            if (
-                ["ticket_status", "status", "ticket status", "track ticket"].includes(
-                    lower
-                )
-            ) {
-                session.ticketStatus = "status_ask_ids";
+            if (["ticket_status", "status", "ticket status", "track ticket"].includes(lower)) {
+                mem.status = "status_ask_ids";
+                mem.draft = {};
+                ticketStore.set(phone, mem);
+
                 session.operation = "ticketing";
                 await session.save();
+
                 await sendMessage(
                     phone,
                     "Please send one or more *Ticket IDs* separated by commas.\n\nExample: `296, 9999999, 290`"
                 );
                 return;
             }
-            // default: show small menu again
             await sendListMessage(
                 phone,
                 "Logistos Bot",
@@ -541,12 +596,15 @@ const ticketCreateHelper = async (phone, msg = "") => {
 
         /* --------------------- FALLBACK / RESET -------------------- */
 
-        case "done":
         default: {
-            // go back to ticket home
-            session.ticketStatus = "ticket_home";
+            console.log("=== [TICKET DEBUG] fallback reached, resetting to ticket_home ===", {
+                phone,
+                memStatus: mem.status,
+            });
+            ticketStore.set(phone, { status: "ticket_home", draft: {} });
             session.operation = "ticketing";
-            session.ticketDraft = {};
+            session.ticketStatus = undefined;
+            session.ticketDraft = undefined;
             await session.save();
             return startTicketFlow(phone, session);
         }
