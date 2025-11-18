@@ -129,6 +129,15 @@ const ticketCreateHelper = async (phone, msg = "") => {
     const text = String(msg || "").trim();
     const lower = text.toLowerCase();
 
+    console.log("=== [TICKET DEBUG] Incoming ===", {
+        phone,
+        text,
+        lower,
+        ticketStatus: session.ticketStatus,
+        operation: session.operation,
+        ticketDraft: session.ticketDraft,
+    });
+
     // global commands
     if (lower === "logout") {
         await sendMessage(phone, "You have been logged out. Type *hi* to log in again.");
@@ -145,11 +154,22 @@ const ticketCreateHelper = async (phone, msg = "") => {
     }
 
     // allow starting status flow from anywhere
+    // allow starting status flow from anywhere
     if (["ticket_status", "status", "ticket status", "track ticket"].includes(lower)) {
+        console.log("=== [TICKET DEBUG] switching to status_ask_ids ===", {
+            prevStatus: session.ticketStatus,
+            operation: session.operation,
+        });
+
         session.operation = "ticketing";
         session.ticketStatus = "status_ask_ids";
         session.ticketDraft = {};
         await session.save();
+
+        console.log("=== [TICKET DEBUG] after save ===", {
+            ticketStatus: session.ticketStatus,
+            operation: session.operation,
+        });
 
         await sendMessage(
             phone,
@@ -413,6 +433,12 @@ const ticketCreateHelper = async (phone, msg = "") => {
         /* ------------------- TICKET STATUS FLOW ------------------- */
 
         case "status_ask_ids": {
+            console.log("=== [TICKET DEBUG] in status_ask_ids ===", {
+                phone,
+                text,
+                ticketStatus: session.ticketStatus,
+            });
+
             const parts = text
                 .split(/[,\s]+/)
                 .map((x) => x.trim())
@@ -421,16 +447,24 @@ const ticketCreateHelper = async (phone, msg = "") => {
                 .map((p) => Number(p))
                 .filter((n) => Number.isFinite(n) && n > 0);
 
+            console.log("=== [TICKET DEBUG] parsed IDs ===", ids);
+
             if (!ids.length) {
                 await sendMessage(
                     phone,
-                    "Please send one or more *numeric Ticket IDs* separated by commas.\n\nExample: `296, 9999999, 290`"
+                    "Please send one or more *numeric Ticket IDs* separated by commas.\n\nExample: `69, 99, 1769`"
                 );
                 return;
             }
 
             try {
+                console.log("=== [TICKET DEBUG] calling getTicketDetailsAPI ===", {
+                    phone,
+                    ids,
+                });
                 const details = await getTicketDetailsAPI(phone, ids);
+                console.log("=== [TICKET DEBUG] API response ===", details);
+
                 const formatted = formatTicketDetails(details, ids);
 
                 await sendMessage(phone, formatted);
